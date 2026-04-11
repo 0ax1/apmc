@@ -11,10 +11,15 @@ mod libc {
         pub fn pipe(fds: *mut [i32; 2]) -> i32;
         pub fn close(fd: i32) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+        pub fn signal(sig: i32, handler: usize) -> usize;
     }
     pub const F_GETFD: i32 = 1;
     pub const F_SETFD: i32 = 2;
     pub const FD_CLOEXEC: i32 = 1;
+    pub const SIGINT: i32 = 2;
+    pub const SIGTERM: i32 = 15;
+    pub const SIG_DFL: usize = 0;
+    pub const SIG_IGN: usize = 1;
 }
 
 const DEFAULT_EVENTS: &[&str] = &[
@@ -185,12 +190,22 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let (pipe_read, pipe_write) = pipe()?;
 
+    // Ignore SIGINT/SIGTERM in parent so we survive Ctrl+C and collect
+    // results after the child exits. KpcManager::drop releases counters.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+    }
+
     if let Some(ref dylib_path) = inject_dylib {
         // Child keeps root so it can read its own thread counters.
         cmd.env("DYLD_INSERT_LIBRARIES", dylib_path);
         cmd.env("KPC_RESULT_FD", pipe_write.to_string());
         unsafe {
             cmd.pre_exec(move || {
+                // Restore default signal handling in child so Ctrl+C kills it.
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
                 let flags = libc::fcntl(pipe_write, libc::F_GETFD);
                 libc::fcntl(pipe_write, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
                 Ok(())
@@ -198,6 +213,13 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         // No dylib -- fall back to system-wide, drop root for child.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                Ok(())
+            });
+        }
         if let (Some(uid), Some(gid)) = (
             std::env::var("SUDO_UID").ok().and_then(|s| s.parse::<u32>().ok()),
             std::env::var("SUDO_GID").ok().and_then(|s| s.parse::<u32>().ok()),
@@ -238,16 +260,15 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "\n Performance counter stats for '{cmd_display}' ({scope}):\n",
     );
 
-    eprintln!("  {:>20}  {}", fmt_comma(delta.cycles), "cycles");
+    eprintln!("  {:>20}  cycles", fmt_comma(delta.cycles));
     let ipc = if delta.cycles > 0 {
         delta.instructions as f64 / delta.cycles as f64
     } else {
         0.0
     };
     eprintln!(
-        "  {:>20}  {}  # {:.2} insn per cycle",
+        "  {:>20}  instructions  # {:.2} insn per cycle",
         fmt_comma(delta.instructions),
-        "instructions",
         ipc,
     );
     eprintln!();

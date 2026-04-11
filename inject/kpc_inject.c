@@ -1,110 +1,127 @@
 // DYLD_INSERT_LIBRARIES helper for per-process PMC counting.
 //
-// Two complementary collection mechanisms cover all thread lifecycle patterns:
+// Architecture:
+//   - Global slot array stores per-thread start counters (no heap allocation)
+//   - __thread variable stores each thread's slot index (async-signal-safe)
+//   - pthread_key destructor fires on natural thread termination (spawn/join)
+//   - SIGUSR2 handler collects counters from live threads at exit (thread pools)
+//   - CAS on slot state ensures exactly-once collection regardless of mechanism
 //
-// 1. TLS destructor: When a thread terminates (e.g., spawn/join), the TLS
-//    destructor fires while kpc state is still live, reads the thread's final
-//    counters, and atomically accumulates the delta.
-//
-// 2. SIGUSR2 signal: At process exit, the library destructor enumerates all
-//    live threads (e.g., thread pool workers that never terminate) via Mach
-//    task_threads, sends each SIGUSR2. The handler runs in each thread's
-//    context where kpc_get_thread_counters(0) reads that thread's counters.
+// All operations in the signal handler are async-signal-safe:
+//   __thread read, atomic CAS, kpc_get_thread_counters (Mach trap), atomic add.
 //
 // The parent process must have already configured and enabled kpc counting.
+//
+// Note: This dylib installs a SIGUSR2 handler. If the target program uses
+// SIGUSR2, it will be overridden. macOS does not support POSIX real-time
+// signals, so there is no less-intrusive alternative.
 
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <pthread/introspection.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdatomic.h>
 
-typedef int (*kpc_get_thread_counters_fn)(unsigned int tid, unsigned int count, unsigned long long *buf);
+typedef int (*kpc_get_thread_counters_fn)(unsigned int tid, unsigned int count,
+                                         unsigned long long *buf);
 typedef int (*kpc_get_counter_count_fn)(unsigned int classes);
 
-#define KPC_CLASS_FIXED  (1 << 0)
+#define KPC_CLASS_FIXED (1 << 0)
 #define KPC_CLASS_CONFIG (1 << 1)
 #define MAX_COUNTERS 16
+#define MAX_THREAD_SLOTS 1024
+
+enum { SLOT_FREE = 0, SLOT_ACTIVE = 1, SLOT_COLLECTED = 2 };
+
+struct thread_slot {
+    _Atomic int state;
+    unsigned long long start[MAX_COUNTERS];
+};
 
 static int g_n_total;
 static int g_result_fd = -1;
 static kpc_get_thread_counters_fn g_get_thread_counters;
 static pthread_introspection_hook_t g_prev_hook;
 
-// Accumulated counter values across all threads.
-static _Atomic unsigned long long g_accum[MAX_COUNTERS];
+static struct thread_slot g_slots[MAX_THREAD_SLOTS];
+static _Atomic int g_next_slot;
 
-// Number of threads still pending signal collection.
+static _Atomic unsigned long long g_accum[MAX_COUNTERS];
 static _Atomic int g_remaining;
 
-// Per-thread storage for the "start" snapshot.
+// Async-signal-safe: just a segment-relative memory read.
+static __thread int t_my_slot = -1;
+
+// Used only to trigger destructor on natural thread termination.
 static pthread_key_t g_key;
 
-// Accumulate (current - start) counters for the calling thread.
-static void accumulate_current_thread(unsigned long long *start) {
-    unsigned long long end[MAX_COUNTERS] = {0};
-    g_get_thread_counters(0, g_n_total, end);
-    for (int i = 0; i < g_n_total; i++) {
-        atomic_fetch_add(&g_accum[i], end[i] - start[i]);
+// Collect counters for a slot. CAS ensures exactly-once semantics —
+// safe to call from both signal handler and TLS destructor.
+static void collect_slot(int slot) {
+    if (slot < 0 || slot >= MAX_THREAD_SLOTS) return;
+    int expected = SLOT_ACTIVE;
+    if (atomic_compare_exchange_strong(&g_slots[slot].state, &expected,
+                                       SLOT_COLLECTED)) {
+        unsigned long long end[MAX_COUNTERS] = {0};
+        g_get_thread_counters(0, g_n_total, end);
+        for (int i = 0; i < g_n_total; i++) {
+            atomic_fetch_add(&g_accum[i], end[i] - g_slots[slot].start[i]);
+        }
     }
 }
 
-// TLS destructor: fires during thread teardown while kpc state is still live.
-// Handles threads that terminate naturally (spawn/join pattern).
-static void tls_destructor(void *arg) {
-    unsigned long long *start = arg;
-    if (!start || !g_get_thread_counters) return;
-    accumulate_current_thread(start);
-    free(start);
-    // TLS value is automatically cleared after destructor returns.
-}
-
-// SIGUSR2 handler: runs on target thread's context where tid=0 reads
-// that thread's own counters. Handles live threads at process exit
-// (thread pool pattern).
+// SIGUSR2 handler — fully async-signal-safe.
+// Uses only: __thread read, atomic CAS, Mach trap, atomic add/sub.
 static void collect_handler(int sig) {
     (void)sig;
-    unsigned long long *start = pthread_getspecific(g_key);
-    if (start && g_get_thread_counters) {
-        accumulate_current_thread(start);
-        free(start);
-        pthread_setspecific(g_key, NULL);
+    if (g_get_thread_counters) {
+        collect_slot(t_my_slot);
     }
     atomic_fetch_sub(&g_remaining, 1);
 }
 
-static void thread_hook(unsigned int event, pthread_t thread,
-                        void *addr, size_t size) {
+// TLS destructor — fires during thread teardown for naturally terminating
+// threads. Uses the slot index from the pthread_key value (not __thread,
+// which may already be torn down). CAS prevents double-counting.
+static void tls_destructor(void *arg) {
+    int slot = (int)(intptr_t)arg - 1;
+    if (g_get_thread_counters) {
+        collect_slot(slot);
+    }
+}
+
+static void thread_hook(unsigned int event, pthread_t thread, void *addr,
+                        size_t size) {
     if (g_get_thread_counters == NULL) goto chain;
 
     if (event == PTHREAD_INTROSPECTION_THREAD_START) {
-        // Record initial counter values in TLS. The TLS destructor or
-        // SIGUSR2 handler will read final values and accumulate the delta.
-        unsigned long long *start = malloc(sizeof(unsigned long long) * MAX_COUNTERS);
-        if (start) {
-            g_get_thread_counters(0, g_n_total, start);
-            pthread_setspecific(g_key, start);
+        int slot = atomic_fetch_add(&g_next_slot, 1);
+        if (slot < MAX_THREAD_SLOTS) {
+            t_my_slot = slot;
+            g_get_thread_counters(0, g_n_total, g_slots[slot].start);
+            atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
+            // Non-NULL value triggers destructor on thread exit.
+            pthread_setspecific(g_key, (void *)(intptr_t)(slot + 1));
         }
     }
-    // THREAD_TERMINATE: no action needed — the TLS destructor handles it.
-    // (By this point, TLS may already be cleaned up anyway.)
 
 chain:
     if (g_prev_hook) g_prev_hook(event, thread, addr, size);
 }
 
-__attribute__((constructor))
-static void kpc_inject_init(void) {
+__attribute__((constructor)) static void kpc_inject_init(void) {
     const char *fd_str = getenv("KPC_RESULT_FD");
     if (!fd_str) return;
     g_result_fd = atoi(fd_str);
 
-    void *h = dlopen("/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_LAZY);
+    void *h = dlopen(
+        "/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_LAZY);
     if (!h) return;
 
     g_get_thread_counters = dlsym(h, "kpc_get_thread_counters");
@@ -118,11 +135,10 @@ static void kpc_inject_init(void) {
 
     for (int i = 0; i < MAX_COUNTERS; i++)
         atomic_store(&g_accum[i], 0);
+    atomic_store(&g_next_slot, 0);
 
-    // TLS key with destructor for natural thread termination.
     pthread_key_create(&g_key, tls_destructor);
 
-    // SIGUSR2 handler for live thread collection at exit.
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = collect_handler;
@@ -131,33 +147,28 @@ static void kpc_inject_init(void) {
     sigaction(SIGUSR2, &sa, NULL);
 
     // Record main thread start.
-    unsigned long long *start = malloc(sizeof(unsigned long long) * MAX_COUNTERS);
-    if (start) {
-        g_get_thread_counters(0, g_n_total, start);
-        pthread_setspecific(g_key, start);
+    int slot = atomic_fetch_add(&g_next_slot, 1);
+    if (slot < MAX_THREAD_SLOTS) {
+        t_my_slot = slot;
+        g_get_thread_counters(0, g_n_total, g_slots[slot].start);
+        atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
+        pthread_setspecific(g_key, (void *)(intptr_t)(slot + 1));
     }
 
     g_prev_hook = pthread_introspection_hook_install(thread_hook);
 }
 
-__attribute__((destructor))
-static void kpc_inject_fini(void) {
+__attribute__((destructor)) static void kpc_inject_fini(void) {
     if (g_result_fd < 0 || !g_get_thread_counters) return;
 
-    // Capture main thread's final delta and clear TLS to prevent the
-    // TLS destructor from double-counting.
-    unsigned long long *start = pthread_getspecific(g_key);
-    if (start) {
-        accumulate_current_thread(start);
-        free(start);
-        pthread_setspecific(g_key, NULL);
-    }
+    // Collect main thread counters (destructor runs on main thread).
+    collect_slot(t_my_slot);
 
-    // Enumerate all live threads and signal them to collect their counters.
-    // This captures thread-pool workers that never terminate naturally.
+    // Signal all live threads to collect their counters.
     thread_act_array_t threads = NULL;
     mach_msg_type_number_t thread_count = 0;
-    kern_return_t kr = task_threads(mach_task_self(), &threads, &thread_count);
+    kern_return_t kr =
+        task_threads(mach_task_self(), &threads, &thread_count);
 
     if (kr == KERN_SUCCESS && thread_count > 0) {
         mach_port_t self_thread = mach_thread_self();
@@ -180,10 +191,8 @@ static void kpc_inject_fini(void) {
                 }
             }
 
-            // Wait for all signal handlers to complete (100ms max).
-            for (int w = 0; w < 1000 && atomic_load(&g_remaining) > 0; w++) {
+            for (int w = 0; w < 1000 && atomic_load(&g_remaining) > 0; w++)
                 usleep(100);
-            }
         }
 
         mach_port_deallocate(mach_task_self(), self_thread);
@@ -191,13 +200,15 @@ static void kpc_inject_fini(void) {
                       sizeof(thread_act_t) * thread_count);
     }
 
-    // Write accumulated totals to the pipe.
+    // Write accumulated totals. Best-effort — partial writes are detected
+    // by the reader (it checks exact byte counts via read_exact).
     unsigned long long totals[MAX_COUNTERS];
     for (int i = 0; i < g_n_total; i++)
         totals[i] = atomic_load(&g_accum[i]);
 
     unsigned int n = (unsigned int)g_n_total;
-    write(g_result_fd, &n, sizeof(n));
-    write(g_result_fd, totals, sizeof(unsigned long long) * g_n_total);
+    ssize_t w = write(g_result_fd, &n, sizeof(n));
+    if (w == (ssize_t)sizeof(n))
+        write(g_result_fd, totals, sizeof(unsigned long long) * g_n_total);
     close(g_result_fd);
 }

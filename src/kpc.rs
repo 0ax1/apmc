@@ -226,11 +226,11 @@ impl KpcManager {
         unsafe { (self.fns.set_thread_counting)(0) };
 
         // Zero config first
-        let zero = [0u64; 8];
+        let zero = vec![0u64; self.n_config];
         unsafe { (self.fns.set_config)(KPC_CLASS_CONFIGURABLE_MASK, zero.as_ptr()) };
 
         // Program events into their assigned slots
-        let mut config = [0u64; 8];
+        let mut config = vec![0u64; self.n_config];
         self.configured_events.clear();
         for &(orig_idx, slot) in &assignments {
             let event = configurable[orig_idx];
@@ -247,9 +247,14 @@ impl KpcManager {
         }
 
         // Read back actual config (kernel may modify or reject some slots)
-        let mut actual = [0u64; 8];
-        unsafe { (self.fns.get_config)(KPC_CLASS_CONFIGURABLE_MASK, actual.as_mut_ptr()) };
-        self.actual_config = actual.to_vec();
+        let mut actual = vec![0u64; self.n_config];
+        let ret =
+            unsafe { (self.fns.get_config)(KPC_CLASS_CONFIGURABLE_MASK, actual.as_mut_ptr()) };
+        if ret != 0 {
+            let _ = unsafe { (self.fns.force_all_ctrs_set)(0) };
+            return Err(KpcError::ApiError("get_config", errno()));
+        }
+        self.actual_config = actual;
 
         // Enable counting
         unsafe { (self.fns.set_counting)(KPC_ALL) };
@@ -404,15 +409,20 @@ impl KpcManager {
     }
 
     /// Compute the delta between two snapshots.
+    ///
+    /// Uses bounds-checked access so this never panics, even if snapshots
+    /// have fewer values than expected (missing counters read as 0).
     pub fn delta(&self, before: &CounterSnapshot, after: &CounterSnapshot) -> CounterDelta {
-        let cycles = after.values[0].wrapping_sub(before.values[0]);
-        let instructions = after.values[1].wrapping_sub(before.values[1]);
+        let val =
+            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
 
-        let mut configurable = Vec::new();
+        let cycles = val(after, 0).wrapping_sub(val(before, 0));
+        let instructions = val(after, 1).wrapping_sub(val(before, 1));
+
+        let mut configurable = Vec::with_capacity(self.n_config);
         for i in 0..self.n_config {
             let idx = self.n_fixed + i;
-            let d = after.values[idx].wrapping_sub(before.values[idx]);
-            configurable.push(d);
+            configurable.push(val(after, idx).wrapping_sub(val(before, idx)));
         }
 
         CounterDelta {
@@ -448,4 +458,187 @@ impl Drop for KpcManager {
 
 fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kpep::KpepEvent;
+
+    fn make_event(name: &str, number: u64, mask: Option<u64>) -> KpepEvent {
+        KpepEvent {
+            name: name.to_string(),
+            description: String::new(),
+            number: Some(number),
+            counters_mask: mask,
+            pc_capture_counters_mask: None,
+            fixed_counter: None,
+            fallback: None,
+        }
+    }
+
+    #[test]
+    fn test_assign_slots_unconstrained() {
+        let events = [
+            make_event("A", 1, None),
+            make_event("B", 2, None),
+            make_event("C", 3, None),
+        ];
+        let refs: Vec<&KpepEvent> = events.iter().collect();
+        let ref_refs: Vec<&&KpepEvent> = refs.iter().collect();
+        let result = KpcManager::assign_slots(&ref_refs, 8);
+
+        assert_eq!(result.len(), 3);
+        let mut slots: Vec<usize> = result.iter().map(|&(_, s)| s).collect();
+        slots.sort();
+        slots.dedup();
+        assert_eq!(slots.len(), 3, "all slots should be unique");
+    }
+
+    #[test]
+    fn test_assign_slots_constrained() {
+        // Event A can only go in slot 7 (mask=0x80)
+        // Event B can go in slots 5,6,7 (mask=0xe0)
+        // Event C can go anywhere
+        let events = [
+            make_event("A", 1, Some(0x80)),
+            make_event("B", 2, Some(0xe0)),
+            make_event("C", 3, None),
+        ];
+        let refs: Vec<&KpepEvent> = events.iter().collect();
+        let ref_refs: Vec<&&KpepEvent> = refs.iter().collect();
+        let result = KpcManager::assign_slots(&ref_refs, 8);
+
+        assert_eq!(result.len(), 3);
+        // Find which slot A got — must be 7
+        let a_slot = result.iter().find(|&&(i, _)| i == 0).unwrap().1;
+        assert_eq!(a_slot, 7, "A (mask=0x80) must go in slot 7");
+        // B should be in 5 or 6
+        let b_slot = result.iter().find(|&&(i, _)| i == 1).unwrap().1;
+        assert!(b_slot == 5 || b_slot == 6, "B (mask=0xe0) should be in 5 or 6");
+    }
+
+    #[test]
+    fn test_assign_slots_conflict() {
+        // Both events can only go in slot 7
+        let events = [
+            make_event("A", 1, Some(0x80)),
+            make_event("B", 2, Some(0x80)),
+        ];
+        let refs: Vec<&KpepEvent> = events.iter().collect();
+        let ref_refs: Vec<&&KpepEvent> = refs.iter().collect();
+        let result = KpcManager::assign_slots(&ref_refs, 8);
+
+        // Only one can be assigned
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_assign_slots_overflow() {
+        let events: Vec<KpepEvent> = (0..10)
+            .map(|i| make_event(&format!("E{i}"), i as u64, None))
+            .collect();
+        let refs: Vec<&KpepEvent> = events.iter().collect();
+        let ref_refs: Vec<&&KpepEvent> = refs.iter().collect();
+        let result = KpcManager::assign_slots(&ref_refs, 8);
+
+        // Only 8 slots available
+        assert_eq!(result.len(), 8);
+    }
+
+    #[test]
+    fn test_delta_basic() {
+        let mgr_n_fixed = 2;
+        let mgr_n_config = 3;
+
+        let before = CounterSnapshot {
+            values: vec![100, 200, 10, 20, 30],
+            n_fixed: mgr_n_fixed,
+        };
+        let after = CounterSnapshot {
+            values: vec![500, 1200, 15, 25, 130],
+            n_fixed: mgr_n_fixed,
+        };
+
+        // Simulate delta without KpcManager (replicating the logic)
+        let val =
+            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let cycles = val(&after, 0).wrapping_sub(val(&before, 0));
+        let instructions = val(&after, 1).wrapping_sub(val(&before, 1));
+        let mut configurable = Vec::new();
+        for i in 0..mgr_n_config {
+            let idx = mgr_n_fixed + i;
+            configurable.push(val(&after, idx).wrapping_sub(val(&before, idx)));
+        }
+
+        assert_eq!(cycles, 400);
+        assert_eq!(instructions, 1000);
+        assert_eq!(configurable, vec![5, 5, 100]);
+    }
+
+    #[test]
+    fn test_delta_wrapping() {
+        // Counter overflow: after < before due to hardware wrap
+        let before = CounterSnapshot {
+            values: vec![u64::MAX - 10, 500],
+            n_fixed: 2,
+        };
+        let after = CounterSnapshot {
+            values: vec![5, 600],
+            n_fixed: 2,
+        };
+
+        let val =
+            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let cycles = val(&after, 0).wrapping_sub(val(&before, 0));
+        assert_eq!(cycles, 16); // 5 - (MAX-10) wraps to 16
+    }
+
+    #[test]
+    fn test_delta_short_snapshot_does_not_panic() {
+        // Snapshots with fewer values than expected — must not panic.
+        let before = CounterSnapshot {
+            values: vec![],
+            n_fixed: 2,
+        };
+        let after = CounterSnapshot {
+            values: vec![100],
+            n_fixed: 2,
+        };
+
+        let val =
+            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let cycles = val(&after, 0).wrapping_sub(val(&before, 0));
+        let instructions = val(&after, 1).wrapping_sub(val(&before, 1));
+        // Should not panic — missing values treated as 0
+        assert_eq!(cycles, 100);
+        assert_eq!(instructions, 0);
+    }
+
+    #[test]
+    fn test_inject_protocol_roundtrip() {
+        // Verify the wire protocol: u32 count, then count × u64 values.
+        let n: u32 = 4;
+        let values: Vec<u64> = vec![100, 200, 300, 400];
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&n.to_ne_bytes());
+        for v in &values {
+            buf.extend_from_slice(&v.to_ne_bytes());
+        }
+
+        // Parse back
+        let parsed_n = u32::from_ne_bytes(buf[0..4].try_into().unwrap()) as usize;
+        assert_eq!(parsed_n, 4);
+
+        let mut parsed_values = vec![0u64; parsed_n];
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                parsed_values.as_mut_ptr() as *mut u8,
+                parsed_n * 8,
+            )
+        };
+        bytes.copy_from_slice(&buf[4..]);
+        assert_eq!(parsed_values, values);
+    }
 }

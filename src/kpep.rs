@@ -104,7 +104,7 @@ impl KpepDatabase {
     pub fn load_from_path(path: &Path) -> Result<Self, KpepError> {
         let value = Value::from_file(path).map_err(|e| KpepError::ReadError {
             path: path.to_path_buf(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, e),
+            source: std::io::Error::other(e),
         })?;
         Self::parse(value)
     }
