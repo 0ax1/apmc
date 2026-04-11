@@ -2,23 +2,27 @@
 
 The macOS equivalent of `perf stat`.
 
-## Quick Start
+## Install
 
 ```bash
-cargo build --release
+cargo install --git https://github.com/0ax1/apmc
+```
 
+## Usage
+
+```bash
 # List all available PMC events for your CPU
-./target/release/apmc list
+apmc list
 
 # Filter events by keyword
-./target/release/apmc list cache
-./target/release/apmc list branch
+apmc list cache
+apmc list branch
 
 # Measure hardware counters for a command (requires root)
-sudo ./target/release/apmc stat -- sleep 1
+sudo apmc stat -- sleep 1
 
 # Choose specific events
-sudo ./target/release/apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
+sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
 ```
 
 ## Example Output
@@ -82,8 +86,9 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 ## Requirements
 
 - macOS on Apple Silicon
-- Root privileges for `apmc stat` (the kernel requires root to program PMC counters and read per-thread counters). The child process also runs as root so the injected dylib can call `kpc_get_thread_counters`.
-- `apmc list` works without root
+- **SIP must be disabled** to access configurable counters (`csrutil disable` from Recovery Mode). Fixed counters (cycles, instructions) may work with SIP enabled, but configurable event programming requires `kpc_force_all_ctrs_set` which is blocked by SIP.
+- Root privileges for `apmc stat` (the kernel requires root to program PMC counters and read per-thread counters)
+- `apmc list` works without root and without disabling SIP
 
 ## See Also
 
