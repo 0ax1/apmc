@@ -2,6 +2,24 @@
 
 The macOS equivalent of `perf stat`.
 
+```
+ Performance counter stats for 'datafusion-bench tpch ...' (per-process):
+
+        24,531,787,227  cycles
+        58,130,536,158  instructions  # 2.37 insn per cycle
+
+            77,463,891  BRANCH_MISPRED_NONSPEC
+         1,110,914,261  L1D_CACHE_MISS_LD
+         1,625,780,918  L1D_CACHE_MISS_ST
+                47,611  ATOMIC_OR_EXCLUSIVE_FAIL
+         8,737,883,140  MAP_STALL
+           334,101,420  LDST_X64_UOP
+         3,428,355,453  MAP_SIMD_UOP
+           534,447,924  SCHEDULE_EMPTY
+
+          1.452434 seconds wall clock
+```
+
 ## Install
 
 ```bash
@@ -23,28 +41,6 @@ sudo apmc stat -- sleep 1
 
 # Choose specific events
 sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
-```
-
-## Example Output
-
-```
-CPU: Apple A15 (2 fixed + 8 configurable counters, 8 CPUs)
-
- Performance counter stats for 'datafusion-bench tpch ...' (per-process):
-
-        24,531,787,227  cycles
-        58,130,536,158  instructions  # 2.37 insn per cycle
-
-            77,463,891  BRANCH_MISPRED_NONSPEC
-         1,110,914,261  L1D_CACHE_MISS_LD
-         1,625,780,918  L1D_CACHE_MISS_ST
-                47,611  ATOMIC_OR_EXCLUSIVE_FAIL
-         8,737,883,140  MAP_STALL
-           334,101,420  LDST_X64_UOP
-         3,428,355,453  MAP_SIMD_UOP
-           534,447,924  SCHEDULE_EMPTY
-
-          1.452434 seconds wall clock
 ```
 
 ## How It Works
