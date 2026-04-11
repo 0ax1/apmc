@@ -50,11 +50,7 @@ sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
 1. **Event discovery**: Parses Apple's kpep database at `/usr/share/kpep/` (binary plists describing all PMC events for each CPU)
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
-4. **Per-process measurement**: Injects a small dylib (`DYLD_INSERT_LIBRARIES`) into the target process that captures hardware counters on every thread. Two mechanisms ensure full coverage:
-   - **TLS destructor**: captures counters for threads that terminate naturally (spawn/join)
-   - **Signal collection**: at process exit, sends `SIGUSR2` to all live threads (thread pools, async runtimes) so each reads its own counters
-
-The injector dylib is compiled from C by `build.rs` and embedded in the `apmc` binary — no external files needed.
+4. **Per-process measurement**: Injects a dylib via `DYLD_INSERT_LIBRARIES` that hooks thread lifecycle to capture per-thread counters. Covers both naturally terminating threads (TLS destructor) and long-lived thread pools (SIGUSR2 at exit).
 
 ## Architecture
 
