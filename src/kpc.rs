@@ -92,6 +92,10 @@ extern "C" {
     fn dlopen(path: *const std::ffi::c_char, mode: i32) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
     fn geteuid() -> u32;
+    fn task_for_pid(target_tport: u32, pid: i32, t: *mut u32) -> i32;
+    fn task_threads(target_task: u32, act_list: *mut *mut u32, act_list_cnt: *mut u32) -> i32;
+    fn mach_task_self() -> u32;
+    fn vm_deallocate(target_task: u32, address: usize, size: usize) -> i32;
 }
 
 fn ncpu() -> usize {
@@ -327,17 +331,74 @@ impl KpcManager {
 
     /// Read counters for the current thread only.
     pub fn read_thread(&self) -> Result<CounterSnapshot, KpcError> {
+        self.read_thread_by_id(0)
+    }
+
+    /// Read counters for a specific Mach thread ID (0 = current thread).
+    pub fn read_thread_by_id(&self, tid: u32) -> Result<CounterSnapshot, KpcError> {
         let n_total = self.n_fixed + self.n_config;
         let mut buf = vec![0u64; n_total];
 
         let ret =
-            unsafe { (self.fns.get_thread_counters)(0, n_total as u32, buf.as_mut_ptr()) };
+            unsafe { (self.fns.get_thread_counters)(tid as i32, n_total as u32, buf.as_mut_ptr()) };
         if ret != 0 {
             return Err(KpcError::ApiError("get_thread_counters", errno()));
         }
 
         Ok(CounterSnapshot {
             values: buf,
+            n_fixed: self.n_fixed,
+        })
+    }
+
+    /// Read counters summed across all threads of a process (by PID).
+    ///
+    /// Uses Mach `task_for_pid` and `task_threads` to enumerate the process's
+    /// threads, then reads each thread's counters via `kpc_get_thread_counters`.
+    pub fn read_process(&self, pid: i32) -> Result<CounterSnapshot, KpcError> {
+        let n_total = self.n_fixed + self.n_config;
+
+        let mut task: u32 = 0;
+        let ret = unsafe { task_for_pid(mach_task_self(), pid, &mut task) };
+        if ret != 0 {
+            return Err(KpcError::ApiError("task_for_pid", ret));
+        }
+
+        let mut thread_list: *mut u32 = std::ptr::null_mut();
+        let mut thread_count: u32 = 0;
+        let ret = unsafe { task_threads(task, &mut thread_list, &mut thread_count) };
+        if ret != 0 {
+            return Err(KpcError::ApiError("task_threads", ret));
+        }
+
+        let threads = unsafe { std::slice::from_raw_parts(thread_list, thread_count as usize) };
+
+        let mut sums = vec![0u64; n_total];
+        for &tid in threads {
+            let mut buf = vec![0u64; n_total];
+            let ret = unsafe {
+                (self.fns.get_thread_counters)(tid as i32, n_total as u32, buf.as_mut_ptr())
+            };
+            if ret == 0 {
+                for i in 0..n_total {
+                    sums[i] = sums[i].wrapping_add(buf[i]);
+                }
+            }
+        }
+
+        // Free the thread list allocated by task_threads
+        if !thread_list.is_null() {
+            unsafe {
+                vm_deallocate(
+                    mach_task_self(),
+                    thread_list as usize,
+                    thread_count as usize * std::mem::size_of::<u32>(),
+                );
+            }
+        }
+
+        Ok(CounterSnapshot {
+            values: sums,
             n_fixed: self.n_fixed,
         })
     }

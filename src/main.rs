@@ -1,9 +1,21 @@
+use std::io::Read as _;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Instant;
 
 use kpc::kpc::KpcManager;
 use kpc::kpep::KpepDatabase;
+
+mod libc {
+    extern "C" {
+        pub fn pipe(fds: *mut [i32; 2]) -> i32;
+        pub fn close(fd: i32) -> i32;
+        pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    }
+    pub const F_GETFD: i32 = 1;
+    pub const F_SETFD: i32 = 2;
+    pub const FD_CLOEXEC: i32 = 1;
+}
 
 const DEFAULT_EVENTS: &[&str] = &[
     "L1D_CACHE_MISS_LD",
@@ -165,32 +177,65 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     mgr.configure(&events)?;
 
-    let before = mgr.read_system_wide()?;
-    let t0 = Instant::now();
+    // The injector dylib is compiled by build.rs and embedded in the binary.
+    let inject_dylib = write_embedded_dylib().ok();
 
     let mut cmd = Command::new(&cmd_args[0]);
     cmd.args(&cmd_args[1..]);
 
-    // Drop root privileges for the child process if we were invoked via sudo.
-    if let (Some(uid), Some(gid)) = (
-        std::env::var("SUDO_UID").ok().and_then(|s| s.parse::<u32>().ok()),
-        std::env::var("SUDO_GID").ok().and_then(|s| s.parse::<u32>().ok()),
-    ) {
-        cmd.uid(uid).gid(gid);
+    let (pipe_read, pipe_write) = pipe()?;
+
+    if let Some(ref dylib_path) = inject_dylib {
+        // Child keeps root so it can read its own thread counters.
+        cmd.env("DYLD_INSERT_LIBRARIES", dylib_path);
+        cmd.env("KPC_RESULT_FD", pipe_write.to_string());
+        unsafe {
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(pipe_write, libc::F_GETFD);
+                libc::fcntl(pipe_write, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+                Ok(())
+            });
+        }
+    } else {
+        // No dylib -- fall back to system-wide, drop root for child.
+        if let (Some(uid), Some(gid)) = (
+            std::env::var("SUDO_UID").ok().and_then(|s| s.parse::<u32>().ok()),
+            std::env::var("SUDO_GID").ok().and_then(|s| s.parse::<u32>().ok()),
+        ) {
+            cmd.uid(uid).gid(gid);
+        }
     }
 
-    let status = cmd.status()?;
+    let before_sw = mgr.read_system_wide()?;
+    let t0 = Instant::now();
 
+    let mut child = cmd.spawn()?;
+    unsafe { libc::close(pipe_write) };
+
+    let status = child.wait()?;
     let elapsed = t0.elapsed();
-    let after = mgr.read_system_wide()?;
 
-    let delta = mgr.delta(&before, &after);
+    // Use per-process results if available, otherwise fall back to system-wide.
+    let (delta, scope) = match read_inject_results(pipe_read, mgr.n_fixed()) {
+        Some(snap) => {
+            let zero = kpc::kpc::CounterSnapshot {
+                values: vec![0u64; snap.values.len()],
+                n_fixed: snap.n_fixed,
+            };
+            (mgr.delta(&zero, &snap), "per-process")
+        }
+        None => {
+            let after = mgr.read_system_wide()?;
+            (mgr.delta(&before_sw, &after), "system-wide")
+        }
+    };
+    unsafe { libc::close(pipe_read) };
+
     let labeled = mgr.labeled_counters(&delta);
 
     let cmd_display = cmd_args.join(" ");
     eprintln!(
-        "\n Performance counter stats for '{cmd_display}' (system-wide, {} CPUs):\n",
-        mgr.ncpu()
+        "\n Performance counter stats for '{cmd_display}' ({scope}):\n",
     );
 
     eprintln!("  {:>20}  {}", fmt_comma(delta.cycles), "cycles");
@@ -230,4 +275,42 @@ fn fmt_comma(n: u64) -> String {
         result.push(ch);
     }
     result.chars().rev().collect()
+}
+
+fn pipe() -> Result<(i32, i32), Box<dyn std::error::Error>> {
+    let mut fds = [0i32; 2];
+    if unsafe { libc::pipe(&mut fds) } != 0 {
+        return Err("pipe() failed".into());
+    }
+    Ok((fds[0], fds[1]))
+}
+
+/// Dylib bytes compiled by build.rs and embedded at compile time.
+const INJECT_DYLIB_BYTES: &[u8] = include_bytes!(env!("KPC_INJECT_DYLIB"));
+
+/// Write the embedded dylib to a temp file and return its path.
+fn write_embedded_dylib() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let path = std::env::temp_dir().join("libkpc_inject.dylib");
+    std::fs::write(&path, INJECT_DYLIB_BYTES)?;
+    Ok(path)
+}
+
+/// Read the per-process counter results written by libkpc_inject.dylib.
+/// Protocol: u32 n_counters, then n_counters × u64 delta values.
+fn read_inject_results(fd: i32, n_fixed: usize) -> Option<kpc::kpc::CounterSnapshot> {
+    let mut file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+    let file: &mut std::fs::File = &mut file;
+
+    let mut n_buf = [0u8; 4];
+    file.read_exact(&mut n_buf).ok()?;
+    let n = u32::from_ne_bytes(n_buf) as usize;
+    if n == 0 || n > 16 {
+        return None;
+    }
+
+    let mut values = vec![0u64; n];
+    let bytes = unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, n * 8) };
+    file.read_exact(bytes).ok()?;
+
+    Some(kpc::kpc::CounterSnapshot { values, n_fixed })
 }
