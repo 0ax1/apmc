@@ -28,7 +28,7 @@ sudo ./target/release/kpc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./
 ```
 CPU: Apple A15 (2 fixed + 8 configurable counters, 8 CPUs)
 
- Performance counter stats for 'datafusion-bench tpch ...' (system-wide, 8 CPUs):
+ Performance counter stats for 'datafusion-bench tpch ...' (per-process):
 
         24,531,787,227  cycles
         58,130,536,158  instructions  # 2.37 insn per cycle
@@ -50,7 +50,11 @@ CPU: Apple A15 (2 fixed + 8 configurable counters, 8 CPUs)
 1. **Event discovery**: Parses Apple's kpep database at `/usr/share/kpep/` (binary plists describing all PMC events for each CPU)
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
-4. **Measurement**: Takes system-wide counter snapshots before/after running the target command
+4. **Per-process measurement**: Injects a small dylib (`DYLD_INSERT_LIBRARIES`) into the target process that captures hardware counters on every thread. Two mechanisms ensure full coverage:
+   - **TLS destructor**: captures counters for threads that terminate naturally (spawn/join)
+   - **Signal collection**: at process exit, sends `SIGUSR2` to all live threads (thread pools, async runtimes) so each reads its own counters
+
+The injector dylib is compiled from C by `build.rs` and embedded in the `kpc` binary — no external files needed.
 
 ## Architecture
 
@@ -80,7 +84,7 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 ## Requirements
 
 - macOS on Apple Silicon
-- Root privileges for `kpc stat` (the kernel requires root to program PMC counters). The measured command itself runs as the original user, not root.
+- Root privileges for `kpc stat` (the kernel requires root to program PMC counters and read per-thread counters). The child process also runs as root so the injected dylib can call `kpc_get_thread_counters`.
 - `kpc list` works without root
 
 ## Library Usage
