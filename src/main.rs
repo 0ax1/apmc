@@ -11,6 +11,8 @@ const DEFAULT_EVENTS: &[&str] = &[
     "MAP_STALL",
     "LDST_X64_UOP",
     "BRANCH_MISPRED_NONSPEC",
+    "INST_SIMD_ALU",
+    "INST_BARRIER",
 ];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
