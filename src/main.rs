@@ -6,12 +6,10 @@ use kpc::kpep::KpepDatabase;
 
 const DEFAULT_EVENTS: &[&str] = &[
     "L1D_CACHE_MISS_LD",
-    "L1D_CACHE_WRITEBACK",
-    "L1I_CACHE_MISS_DEMAND",
-    "L1D_TLB_MISS",
-    "L2_TLB_MISS_DATA",
+    "L1D_CACHE_MISS_ST",
     "ATOMIC_OR_EXCLUSIVE_FAIL",
     "MAP_STALL",
+    "LDST_X64_UOP",
     "BRANCH_MISPRED_NONSPEC",
 ];
 
