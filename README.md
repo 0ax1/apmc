@@ -79,7 +79,7 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 
 ## Requirements
 
-- macOS on Apple Silicon (M1/M2/M3/M4)
+- macOS on Apple Silicon
 - Root privileges for `kpc stat` (the kernel requires root to program PMC counters)
 - `kpc list` works without root
 
