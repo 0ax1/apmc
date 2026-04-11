@@ -1,8 +1,6 @@
 # apmc
 
-CLI tool and Rust library for reading Apple Silicon hardware performance counters via the private `kperf` framework.
-
-The macOS equivalent of `perf stat` on Linux.
+The macOS equivalent of `perf stat`.
 
 ## Quick Start
 
@@ -86,33 +84,6 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 - macOS on Apple Silicon
 - Root privileges for `apmc stat` (the kernel requires root to program PMC counters and read per-thread counters). The child process also runs as root so the injected dylib can call `kpc_get_thread_counters`.
 - `apmc list` works without root
-
-## Library Usage
-
-```rust
-use apmc::{KpcManager, KpepDatabase};
-
-let db = KpepDatabase::load_current_cpu()?;
-
-// Look up events
-let events: Vec<_> = ["L1D_CACHE_MISS_LD", "BRANCH_MISPRED_NONSPEC"]
-    .iter()
-    .filter_map(|name| db.event_by_name(name))
-    .collect();
-
-// Configure and read counters
-let mut mgr = KpcManager::new()?; // requires root
-mgr.configure(&events)?;
-
-let before = mgr.read_system_wide()?;
-// ... run workload ...
-let after = mgr.read_system_wide()?;
-
-let delta = mgr.delta(&before, &after);
-for (name, value) in mgr.labeled_counters(&delta) {
-    println!("{name}: {value}");
-}
-```
 
 ## See Also
 
