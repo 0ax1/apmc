@@ -287,10 +287,12 @@ impl KpcManager {
 
         for (orig_idx, _) in by_constraint {
             let event = &events[orig_idx];
-            let slot = (0..n_slots).filter(|s| !used[*s]).find(|s| match event.counters_mask {
-                Some(mask) => (mask >> s) & 1 != 0,
-                None => true,
-            });
+            let slot = (0..n_slots)
+                .filter(|s| !used[*s])
+                .find(|s| match event.counters_mask {
+                    Some(mask) => (mask >> s) & 1 != 0,
+                    None => true,
+                });
 
             if let Some(s) = slot {
                 used[s] = true;
@@ -313,9 +315,8 @@ impl KpcManager {
         let mut buf = vec![0u64; buf_size];
         let mut cur_cpu: i32 = 0;
 
-        let ret = unsafe {
-            (self.fns.get_cpu_counters)(1, KPC_ALL, &mut cur_cpu, buf.as_mut_ptr())
-        };
+        let ret =
+            unsafe { (self.fns.get_cpu_counters)(1, KPC_ALL, &mut cur_cpu, buf.as_mut_ptr()) };
         if ret != 0 {
             return Err(KpcError::ApiError("get_cpu_counters", errno()));
         }
@@ -413,8 +414,7 @@ impl KpcManager {
     /// Uses bounds-checked access so this never panics, even if snapshots
     /// have fewer values than expected (missing counters read as 0).
     pub fn delta(&self, before: &CounterSnapshot, after: &CounterSnapshot) -> CounterDelta {
-        let val =
-            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let val = |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
 
         let cycles = val(after, 0).wrapping_sub(val(before, 0));
         let instructions = val(after, 1).wrapping_sub(val(before, 1));
@@ -515,7 +515,10 @@ mod tests {
         assert_eq!(a_slot, 7, "A (mask=0x80) must go in slot 7");
         // B should be in 5 or 6
         let b_slot = result.iter().find(|&&(i, _)| i == 1).unwrap().1;
-        assert!(b_slot == 5 || b_slot == 6, "B (mask=0xe0) should be in 5 or 6");
+        assert!(
+            b_slot == 5 || b_slot == 6,
+            "B (mask=0xe0) should be in 5 or 6"
+        );
     }
 
     #[test]
@@ -561,8 +564,7 @@ mod tests {
         };
 
         // Simulate delta without KpcManager (replicating the logic)
-        let val =
-            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let val = |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
         let cycles = val(&after, 0).wrapping_sub(val(&before, 0));
         let instructions = val(&after, 1).wrapping_sub(val(&before, 1));
         let mut configurable = Vec::new();
@@ -588,8 +590,7 @@ mod tests {
             n_fixed: 2,
         };
 
-        let val =
-            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let val = |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
         let cycles = val(&after, 0).wrapping_sub(val(&before, 0));
         assert_eq!(cycles, 16); // 5 - (MAX-10) wraps to 16
     }
@@ -606,8 +607,7 @@ mod tests {
             n_fixed: 2,
         };
 
-        let val =
-            |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
+        let val = |snap: &CounterSnapshot, idx: usize| snap.values.get(idx).copied().unwrap_or(0);
         let cycles = val(&after, 0).wrapping_sub(val(&before, 0));
         let instructions = val(&after, 1).wrapping_sub(val(&before, 1));
         // Should not panic — missing values treated as 0
@@ -633,10 +633,7 @@ mod tests {
 
         let mut parsed_values = vec![0u64; parsed_n];
         let bytes = unsafe {
-            std::slice::from_raw_parts_mut(
-                parsed_values.as_mut_ptr() as *mut u8,
-                parsed_n * 8,
-            )
+            std::slice::from_raw_parts_mut(parsed_values.as_mut_ptr() as *mut u8, parsed_n * 8)
         };
         bytes.copy_from_slice(&buf[4..]);
         assert_eq!(parsed_values, values);

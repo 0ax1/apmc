@@ -216,9 +216,7 @@ impl KpepDatabase {
                 .unwrap_or("")
                 .to_string();
 
-            let number = ev_dict
-                .get("number")
-                .and_then(|v| v.as_unsigned_integer());
+            let number = ev_dict.get("number").and_then(|v| v.as_unsigned_integer());
 
             let counters_mask = ev_dict
                 .get("counters_mask")
@@ -289,7 +287,11 @@ fn read_cpu_info() -> Result<(u32, u32, u32), KpepError> {
 }
 
 /// Find the kpep database file matching the given CPU identifiers.
-fn find_database_path(cpu_type: u32, cpu_subtype: u32, cpu_family: u32) -> Result<PathBuf, KpepError> {
+fn find_database_path(
+    cpu_type: u32,
+    cpu_subtype: u32,
+    cpu_family: u32,
+) -> Result<PathBuf, KpepError> {
     let filename = format!(
         "cpu_{:x}_{:x}_{:x}.plist",
         cpu_type, cpu_subtype, cpu_family

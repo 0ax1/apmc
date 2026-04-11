@@ -1,4 +1,4 @@
-# kpc
+# apmc
 
 CLI tool and Rust library for reading Apple Silicon hardware performance counters via the private `kperf` framework.
 
@@ -10,17 +10,17 @@ The macOS equivalent of `perf stat` on Linux.
 cargo build --release
 
 # List all available PMC events for your CPU
-./target/release/kpc list
+./target/release/apmc list
 
 # Filter events by keyword
-./target/release/kpc list cache
-./target/release/kpc list branch
+./target/release/apmc list cache
+./target/release/apmc list branch
 
 # Measure hardware counters for a command (requires root)
-sudo ./target/release/kpc stat -- sleep 1
+sudo ./target/release/apmc stat -- sleep 1
 
 # Choose specific events
-sudo ./target/release/kpc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
+sudo ./target/release/apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
 ```
 
 ## Example Output
@@ -54,7 +54,7 @@ CPU: Apple A15 (2 fixed + 8 configurable counters, 8 CPUs)
    - **TLS destructor**: captures counters for threads that terminate naturally (spawn/join)
    - **Signal collection**: at process exit, sends `SIGUSR2` to all live threads (thread pools, async runtimes) so each reads its own counters
 
-The injector dylib is compiled from C by `build.rs` and embedded in the `kpc` binary — no external files needed.
+The injector dylib is compiled from C by `build.rs` and embedded in the `apmc` binary — no external files needed.
 
 ## Architecture
 
@@ -66,7 +66,7 @@ Some events are constrained to specific counter slots via a `counters_mask`. The
 
 ## Default Events
 
-When no `-e` flag is given, `kpc stat` monitors these 8 events (plus cycles and instructions from fixed counters):
+When no `-e` flag is given, `apmc stat` monitors these 8 events (plus cycles and instructions from fixed counters):
 
 | Event | What it measures | Why it matters |
 |---|---|---|
@@ -84,13 +84,13 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 ## Requirements
 
 - macOS on Apple Silicon
-- Root privileges for `kpc stat` (the kernel requires root to program PMC counters and read per-thread counters). The child process also runs as root so the injected dylib can call `kpc_get_thread_counters`.
-- `kpc list` works without root
+- Root privileges for `apmc stat` (the kernel requires root to program PMC counters and read per-thread counters). The child process also runs as root so the injected dylib can call `kpc_get_thread_counters`.
+- `apmc list` works without root
 
 ## Library Usage
 
 ```rust
-use kpc::{KpcManager, KpepDatabase};
+use apmc::{KpcManager, KpepDatabase};
 
 let db = KpepDatabase::load_current_cpu()?;
 

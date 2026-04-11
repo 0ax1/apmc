@@ -3,8 +3,8 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Instant;
 
-use kpc::kpc::KpcManager;
-use kpc::kpep::KpepDatabase;
+use apmc::kpc::KpcManager;
+use apmc::kpep::KpepDatabase;
 
 mod libc {
     extern "C" {
@@ -51,13 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_usage() {
-    eprintln!("kpc — Apple Silicon hardware performance counters\n");
+    eprintln!("apmc — Apple Silicon hardware performance counters\n");
     eprintln!("Usage:");
-    eprintln!("  kpc list [filter]                                   List available PMC events");
+    eprintln!("  apmc list [filter]                                    List available PMC events");
     eprintln!(
-        "  kpc stat [-e EVT1,EVT2,...] [--] <cmd> [args...]    Measure counters for a command"
+        "  apmc stat [-e EVT1,EVT2,...] [--] <cmd> [args...]    Measure counters for a command"
     );
-    eprintln!("  kpc help                                            Show this help\n");
+    eprintln!("  apmc help                                             Show this help\n");
     eprintln!("The stat subcommand requires root (sudo).");
 }
 
@@ -144,9 +144,9 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if cmd_start >= args.len() {
-        eprintln!("Usage: sudo kpc stat [-e EVT1,EVT2,...] [--] <command> [args...]");
+        eprintln!("Usage: sudo apmc stat [-e EVT1,EVT2,...] [--] <command> [args...]");
         eprintln!("\nDefault events: {}", DEFAULT_EVENTS.join(", "));
-        eprintln!("\nRun `kpc list` to see all available events.");
+        eprintln!("\nRun `apmc list` to see all available events.");
         std::process::exit(1);
     }
 
@@ -221,8 +221,12 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             });
         }
         if let (Some(uid), Some(gid)) = (
-            std::env::var("SUDO_UID").ok().and_then(|s| s.parse::<u32>().ok()),
-            std::env::var("SUDO_GID").ok().and_then(|s| s.parse::<u32>().ok()),
+            std::env::var("SUDO_UID")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok()),
+            std::env::var("SUDO_GID")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok()),
         ) {
             cmd.uid(uid).gid(gid);
         }
@@ -240,7 +244,7 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Use per-process results if available, otherwise fall back to system-wide.
     let (delta, scope) = match read_inject_results(pipe_read, mgr.n_fixed()) {
         Some(snap) => {
-            let zero = kpc::kpc::CounterSnapshot {
+            let zero = apmc::kpc::CounterSnapshot {
                 values: vec![0u64; snap.values.len()],
                 n_fixed: snap.n_fixed,
             };
@@ -256,9 +260,7 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let labeled = mgr.labeled_counters(&delta);
 
     let cmd_display = cmd_args.join(" ");
-    eprintln!(
-        "\n Performance counter stats for '{cmd_display}' ({scope}):\n",
-    );
+    eprintln!("\n Performance counter stats for '{cmd_display}' ({scope}):\n",);
 
     eprintln!("  {:>20}  cycles", fmt_comma(delta.cycles));
     let ipc = if delta.cycles > 0 {
@@ -311,14 +313,14 @@ const INJECT_DYLIB_BYTES: &[u8] = include_bytes!(env!("KPC_INJECT_DYLIB"));
 
 /// Write the embedded dylib to a temp file and return its path.
 fn write_embedded_dylib() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let path = std::env::temp_dir().join("libkpc_inject.dylib");
+    let path = std::env::temp_dir().join("libapmc_inject.dylib");
     std::fs::write(&path, INJECT_DYLIB_BYTES)?;
     Ok(path)
 }
 
 /// Read the per-process counter results written by libkpc_inject.dylib.
 /// Protocol: u32 n_counters, then n_counters × u64 delta values.
-fn read_inject_results(fd: i32, n_fixed: usize) -> Option<kpc::kpc::CounterSnapshot> {
+fn read_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnapshot> {
     let mut file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
     let file: &mut std::fs::File = &mut file;
 
@@ -333,5 +335,5 @@ fn read_inject_results(fd: i32, n_fixed: usize) -> Option<kpc::kpc::CounterSnaps
     let bytes = unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, n * 8) };
     file.read_exact(bytes).ok()?;
 
-    Some(kpc::kpc::CounterSnapshot { values, n_fixed })
+    Some(apmc::kpc::CounterSnapshot { values, n_fixed })
 }

@@ -1,9 +1,13 @@
 [package]
-name = "kpc"
+name = "apmc"
 version = "0.1.0"
 edition = "2021"
 description = "Apple Silicon hardware performance counter access via kpc/kpep"
 license = "Apache-2.0"
+
+[[bin]]
+name = "apmc"
+path = "src/main.rs"
 
 [dependencies]
 plist = "1"

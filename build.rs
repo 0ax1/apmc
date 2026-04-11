@@ -41,8 +41,5 @@ fn main() {
         "failed to compile inject/kpc_inject.c into dylib"
     );
 
-    println!(
-        "cargo:rustc-env=KPC_INJECT_DYLIB={}",
-        dylib_path.display()
-    );
+    println!("cargo:rustc-env=KPC_INJECT_DYLIB={}", dylib_path.display());
 }

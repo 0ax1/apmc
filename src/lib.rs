@@ -12,7 +12,7 @@
 //!
 //! # Example
 //! ```no_run
-//! use kpc::{KpcManager, kpep::KpepDatabase};
+//! use apmc::{KpcManager, kpep::KpepDatabase};
 //!
 //! let db = KpepDatabase::load_current_cpu().unwrap();
 //! for event in db.events() {
@@ -20,8 +20,8 @@
 //! }
 //! ```
 
-pub mod kpep;
 pub mod kpc;
+pub mod kpep;
 
 pub use kpc::KpcManager;
 pub use kpep::KpepDatabase;
