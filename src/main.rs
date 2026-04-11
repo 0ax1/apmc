@@ -1,3 +1,4 @@
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::time::Instant;
 
@@ -167,7 +168,18 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let before = mgr.read_system_wide()?;
     let t0 = Instant::now();
 
-    let status = Command::new(&cmd_args[0]).args(&cmd_args[1..]).status()?;
+    let mut cmd = Command::new(&cmd_args[0]);
+    cmd.args(&cmd_args[1..]);
+
+    // Drop root privileges for the child process if we were invoked via sudo.
+    if let (Some(uid), Some(gid)) = (
+        std::env::var("SUDO_UID").ok().and_then(|s| s.parse::<u32>().ok()),
+        std::env::var("SUDO_GID").ok().and_then(|s| s.parse::<u32>().ok()),
+    ) {
+        cmd.uid(uid).gid(gid);
+    }
+
+    let status = cmd.status()?;
 
     let elapsed = t0.elapsed();
     let after = mgr.read_system_wide()?;
