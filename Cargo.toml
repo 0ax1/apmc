@@ -1,0 +1,10 @@
+[package]
+name = "kpc"
+version = "0.1.0"
+edition = "2021"
+description = "Apple Silicon hardware performance counter access via kpc/kpep"
+license = "Apache-2.0"
+
+[dependencies]
+plist = "1"
+thiserror = "2"
