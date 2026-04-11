@@ -80,9 +80,8 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 ## Requirements
 
 - macOS on Apple Silicon
-- **SIP must be disabled** to access configurable counters (`csrutil disable` from Recovery Mode). Fixed counters (cycles, instructions) may work with SIP enabled, but configurable event programming requires `kpc_force_all_ctrs_set` which is blocked by SIP.
-- Root privileges for `apmc stat` (the kernel requires root to program PMC counters and read per-thread counters)
-- `apmc list` works without root and without disabling SIP
+- SIP disabled (`csrutil disable` from Recovery Mode)
+- Root privileges for `apmc stat`
 
 ## See Also
 
