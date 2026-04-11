@@ -28,7 +28,7 @@ sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
 ## Example Output
 
 ```
- Performance counter stats for 'datafusion-bench tpch ...' (per-process):
+ Performance counter stats for 'datafusion-bench tpch ...':
 
         24,531,787,227  cycles
         58,130,536,158  instructions  # 2.37 insn per cycle

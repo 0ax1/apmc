@@ -242,17 +242,17 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let elapsed = t0.elapsed();
 
     // Use per-process results if available, otherwise fall back to system-wide.
-    let (delta, scope) = match read_inject_results(pipe_read, mgr.n_fixed()) {
+    let delta = match read_inject_results(pipe_read, mgr.n_fixed()) {
         Some(snap) => {
             let zero = apmc::kpc::CounterSnapshot {
                 values: vec![0u64; snap.values.len()],
                 n_fixed: snap.n_fixed,
             };
-            (mgr.delta(&zero, &snap), "per-process")
+            mgr.delta(&zero, &snap)
         }
         None => {
             let after = mgr.read_system_wide()?;
-            (mgr.delta(&before_sw, &after), "system-wide")
+            mgr.delta(&before_sw, &after)
         }
     };
     unsafe { libc::close(pipe_read) };
@@ -260,7 +260,7 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let labeled = mgr.labeled_counters(&delta);
 
     let cmd_display = cmd_args.join(" ");
-    eprintln!("\n Performance counter stats for '{cmd_display}' ({scope}):\n",);
+    eprintln!("\n Performance counter stats for '{cmd_display}':\n");
 
     eprintln!("  {:>20}  cycles", fmt_comma(delta.cycles));
     let ipc = if delta.cycles > 0 {
