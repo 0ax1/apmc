@@ -64,16 +64,16 @@ Some events are constrained to specific counter slots via a `counters_mask`. The
 
 When no `-e` flag is given, `apmc stat` monitors these 8 events (plus cycles and instructions from fixed counters):
 
-| Event | What it measures | Why it matters |
-|---|---|---|
-| `L1D_CACHE_MISS_LD` | Loads that missed L1 data cache | Primary memory bottleneck signal -- every miss goes to L2 or further |
-| `L1D_CACHE_MISS_ST` | Stores that missed L1 data cache | Write-path cache pressure -- high counts mean dirty data thrashing |
-| `ATOMIC_OR_EXCLUSIVE_FAIL` | Atomic/exclusive ops that failed due to contention | Cross-core cache line contention -- the coherency signal Apple exposes |
-| `MAP_STALL` | Total cycles the pipeline was stalled | Universal "time wasted" counter -- how much of your runtime is stalls |
-| `LDST_X64_UOP` | Loads/stores crossing a 64-byte cacheline boundary | Alignment problems -- directly actionable by fixing struct/buffer layout |
-| `BRANCH_MISPRED_NONSPEC` | Retired mispredicted branches | Unpredictable control flow -- costly pipeline flushes on each mispredict |
-| `MAP_SIMD_UOP` | SIMD/FP micro-ops dispatched | Vectorization utilization -- low ratio vs total instructions means work is scalar |
-| `SCHEDULE_EMPTY` | Cycles the scheduler had nothing to run | Frontend starvation -- complements MAP_STALL to distinguish backend-blocked vs starved |
+| Event | Description |
+|---|---|
+| `L1D_CACHE_MISS_LD` | Loads that missed L1 data cache |
+| `L1D_CACHE_MISS_ST` | Stores that missed L1 data cache |
+| `ATOMIC_OR_EXCLUSIVE_FAIL` | Atomic/exclusive ops that failed due to contention |
+| `MAP_STALL` | Cycles the pipeline was stalled |
+| `LDST_X64_UOP` | Loads/stores crossing a 64-byte cacheline boundary |
+| `BRANCH_MISPRED_NONSPEC` | Mispredicted branches |
+| `MAP_SIMD_UOP` | SIMD/FP micro-ops dispatched |
+| `SCHEDULE_EMPTY` | Cycles the scheduler had nothing to run |
 
 Note: `INST_*` events (retired instruction counts) require Apple's private `com.apple.private.kperf` entitlement and silently read 0 without it. The `MAP_*_UOP` variants are the working alternative.
 
