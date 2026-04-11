@@ -50,7 +50,7 @@ sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
 1. **Event discovery**: Parses Apple's kpep database at `/usr/share/kpep/` (binary plists describing all PMC events for each CPU)
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
-4. **Per-process measurement**: Injects a dylib via `DYLD_INSERT_LIBRARIES` that hooks thread lifecycle to capture per-thread counters. Covers both naturally terminating threads (TLS destructor) and long-lived thread pools (SIGUSR2 at exit).
+4. **Per-process measurement**: A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools.
 
 ## Architecture
 
