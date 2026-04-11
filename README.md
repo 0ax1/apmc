@@ -26,23 +26,23 @@ sudo ./target/release/kpc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./
 ## Example Output
 
 ```
-CPU: Apple M2 (2 fixed + 8 configurable counters, 8 CPUs)
+CPU: Apple A15 (2 fixed + 8 configurable counters, 8 CPUs)
 
- Performance counter stats for 'sleep 1' (system-wide, 8 CPUs):
+ Performance counter stats for 'datafusion-bench tpch ...' (system-wide, 8 CPUs):
 
-       1,042,861,523  cycles
-         348,291,082  instructions  # 0.33 insn per cycle
+        24,531,787,227  cycles
+        58,130,536,158  instructions  # 2.37 insn per cycle
 
-           1,204,531  L1D_CACHE_MISS_LD
-             892,104  L1D_CACHE_MISS_ST
-               3,841  ATOMIC_OR_EXCLUSIVE_FAIL
-          22,103,842  MAP_STALL
-              18,492  LDST_X64_UOP
-              48,201  BRANCH_MISPRED_NONSPEC
-          91,204,381  INST_SIMD_ALU
-               1,203  INST_BARRIER
+            77,463,891  BRANCH_MISPRED_NONSPEC
+         1,110,914,261  L1D_CACHE_MISS_LD
+         1,625,780,918  L1D_CACHE_MISS_ST
+                47,611  ATOMIC_OR_EXCLUSIVE_FAIL
+         8,737,883,140  MAP_STALL
+           334,101,420  LDST_X64_UOP
+         3,428,355,453  MAP_SIMD_UOP
+           534,447,924  SCHEDULE_EMPTY
 
-        1.002841 seconds wall clock
+          1.452434 seconds wall clock
 ```
 
 ## How It Works
@@ -72,8 +72,10 @@ When no `-e` flag is given, `kpc stat` monitors these 8 events (plus cycles and 
 | `MAP_STALL` | Total cycles the pipeline was stalled | Universal "time wasted" counter -- how much of your runtime is stalls |
 | `LDST_X64_UOP` | Loads/stores crossing a 64-byte cacheline boundary | Alignment problems -- directly actionable by fixing struct/buffer layout |
 | `BRANCH_MISPRED_NONSPEC` | Retired mispredicted branches | Unpredictable control flow -- costly pipeline flushes on each mispredict |
-| `INST_SIMD_ALU` | Retired SIMD/FP ALU instructions | Vectorization utilization -- low count means work went scalar unexpectedly |
-| `INST_BARRIER` | Retired memory barrier instructions (dmb/dsb) | Synchronization overhead -- high counts mean excessive barrier traffic |
+| `MAP_SIMD_UOP` | SIMD/FP micro-ops dispatched | Vectorization utilization -- low ratio vs total instructions means work is scalar |
+| `SCHEDULE_EMPTY` | Cycles the scheduler had nothing to run | Frontend starvation -- complements MAP_STALL to distinguish backend-blocked vs starved |
+
+Note: `INST_*` events (retired instruction counts) require Apple's private `com.apple.private.kperf` entitlement and silently read 0 without it. The `MAP_*_UOP` variants are the working alternative.
 
 ## Requirements
 
