@@ -34,13 +34,13 @@ CPU: Apple M2 (2 fixed + 8 configurable counters, 8 CPUs)
          348,291,082  instructions  # 0.33 insn per cycle
 
            1,204,531  L1D_CACHE_MISS_LD
-             892,104  L1D_CACHE_WRITEBACK
-             304,821  L1I_CACHE_MISS_DEMAND
-              12,491  L1D_TLB_MISS
-               2,304  L2_TLB_MISS_DATA
-          22,103,842  MAP_STALL_DISPATCH
+             892,104  L1D_CACHE_MISS_ST
+               3,841  ATOMIC_OR_EXCLUSIVE_FAIL
+          22,103,842  MAP_STALL
+              18,492  LDST_X64_UOP
               48,201  BRANCH_MISPRED_NONSPEC
-         102,384,012  INST_LDST
+          91,204,381  INST_SIMD_ALU
+               1,203  INST_BARRIER
 
         1.002841 seconds wall clock
 ```
@@ -62,18 +62,18 @@ Some events are constrained to specific counter slots via a `counters_mask`. The
 
 ## Default Events
 
-When no `-e` flag is given, `kpc stat` monitors:
+When no `-e` flag is given, `kpc stat` monitors these 8 events (plus cycles and instructions from fixed counters):
 
-| Event | What it measures |
-|---|---|
-| `L1D_CACHE_MISS_LD` | L1 data cache load misses |
-| `L1I_CACHE_MISS_DEMAND` | L1 instruction cache misses |
-| `L1D_TLB_MISS` | L1 data TLB misses |
-| `L2_TLB_MISS_DATA` | L2 TLB misses (triggers page walks) |
-| `ATOMIC_OR_EXCLUSIVE_FAIL` | Atomic/exclusive contention failures |
-| `MAP_STALL_DISPATCH` | Cycles stalled on dispatch backpressure |
-| `BRANCH_MISPRED_NONSPEC` | Retired mispredicted branches |
-| `INST_LDST` | Retired load/store instructions |
+| Event | What it measures | Why it matters |
+|---|---|---|
+| `L1D_CACHE_MISS_LD` | Loads that missed L1 data cache | Primary memory bottleneck signal -- every miss goes to L2 or further |
+| `L1D_CACHE_MISS_ST` | Stores that missed L1 data cache | Write-path cache pressure -- high counts mean dirty data thrashing |
+| `ATOMIC_OR_EXCLUSIVE_FAIL` | Atomic/exclusive ops that failed due to contention | Cross-core cache line contention -- the coherency signal Apple exposes |
+| `MAP_STALL` | Total cycles the pipeline was stalled | Universal "time wasted" counter -- how much of your runtime is stalls |
+| `LDST_X64_UOP` | Loads/stores crossing a 64-byte cacheline boundary | Alignment problems -- directly actionable by fixing struct/buffer layout |
+| `BRANCH_MISPRED_NONSPEC` | Retired mispredicted branches | Unpredictable control flow -- costly pipeline flushes on each mispredict |
+| `INST_SIMD_ALU` | Retired SIMD/FP ALU instructions | Vectorization utilization -- low count means work went scalar unexpectedly |
+| `INST_BARRIER` | Retired memory barrier instructions (dmb/dsb) | Synchronization overhead -- high counts mean excessive barrier traffic |
 
 ## Requirements
 
