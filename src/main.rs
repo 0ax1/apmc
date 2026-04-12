@@ -320,9 +320,6 @@ fn cmd_stat(
 /// Always prints cycles and instructions (from fixed counters) with IPC,
 /// followed by each configured event's value and description, wall-clock
 /// time, and exit status if the command failed.
-/// Maximum output line length. Lines with descriptions are truncated here.
-const LINE_LIMIT: usize = 130;
-
 fn print_results(
     mgr: &KpcManager,
     delta: &apmc::kpc::CounterDelta,
@@ -350,9 +347,13 @@ fn print_results(
         if comment.is_empty() {
             eprintln!("{prefix}");
         } else {
+            // Strip parenthetical asides from descriptions to keep lines short.
+            let short = match comment.find(" (") {
+                Some(pos) => comment[..pos].trim_end(),
+                None => comment,
+            };
             let pad = comment_col.saturating_sub(prefix.len()).max(2);
-            let line = format!("{prefix}{:pad$}# {comment}", "");
-            eprintln!("{}", &line[..line.len().min(LINE_LIMIT)]);
+            eprintln!("{prefix}{:pad$}# {short}", "");
         }
     };
 
