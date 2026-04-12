@@ -323,7 +323,7 @@ fn find_database_path(
     })
 }
 
-// Need libc for sysctlbyname
+// Need libc for sysctlbyname.
 pub(crate) mod libc {
     extern "C" {
         pub fn sysctlbyname(
@@ -333,5 +333,217 @@ pub(crate) mod libc {
             newp: *mut std::ffi::c_void,
             newlen: usize,
         ) -> std::ffi::c_int;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plist::{Dictionary, Value};
+
+    fn make_fixed_event(name: &str, fixed_counter: u64) -> KpepEvent {
+        KpepEvent {
+            name: name.to_string(),
+            description: "fixed counter".to_string(),
+            number: None,
+            counters_mask: None,
+            pc_capture_counters_mask: None,
+            fixed_counter: Some(fixed_counter),
+            fallback: None,
+        }
+    }
+
+    fn make_config_event(name: &str, number: u64) -> KpepEvent {
+        KpepEvent {
+            name: name.to_string(),
+            description: "configurable event".to_string(),
+            number: Some(number),
+            counters_mask: None,
+            pc_capture_counters_mask: None,
+            fixed_counter: None,
+            fallback: None,
+        }
+    }
+
+    #[test]
+    fn fixed_event_classification() {
+        let event = make_fixed_event("FIXED_CYCLES", 0);
+        assert!(event.is_fixed());
+        assert!(!event.is_configurable());
+    }
+
+    #[test]
+    fn configurable_event_classification() {
+        let event = make_config_event("L1D_MISS", 42);
+        assert!(event.is_configurable());
+        assert!(!event.is_fixed());
+    }
+
+    #[test]
+    fn event_with_both_fixed_and_number_is_fixed() {
+        let event = KpepEvent {
+            name: "DUAL".to_string(),
+            description: String::new(),
+            number: Some(42),
+            counters_mask: None,
+            pc_capture_counters_mask: None,
+            fixed_counter: Some(0),
+            fallback: None,
+        };
+        assert!(event.is_fixed());
+        assert!(!event.is_configurable());
+    }
+
+    #[test]
+    fn event_with_neither_is_neither() {
+        let event = KpepEvent {
+            name: "EMPTY".to_string(),
+            description: String::new(),
+            number: None,
+            counters_mask: None,
+            pc_capture_counters_mask: None,
+            fixed_counter: None,
+            fallback: None,
+        };
+        assert!(!event.is_fixed());
+        assert!(!event.is_configurable());
+    }
+
+    /// Build a minimal kpep plist Value for testing the parser.
+    fn build_test_plist(
+        events: Vec<(&str, Option<u64>, Option<u64>)>,
+        aliases: Vec<(&str, &str)>,
+    ) -> Value {
+        let mut events_dict = Dictionary::new();
+        for (name, number, fixed_counter) in events {
+            let mut ev = Dictionary::new();
+            ev.insert(
+                "description".to_string(),
+                Value::String(format!("{name} desc")),
+            );
+            if let Some(n) = number {
+                ev.insert("number".to_string(), Value::Integer(n.into()));
+            }
+            if let Some(fc) = fixed_counter {
+                ev.insert("fixed_counter".to_string(), Value::Integer(fc.into()));
+            }
+            events_dict.insert(name.to_string(), Value::Dictionary(ev));
+        }
+
+        let mut alias_dict = Dictionary::new();
+        for (alias, target) in aliases {
+            alias_dict.insert(alias.to_string(), Value::String(target.to_string()));
+        }
+
+        let mut cpu = Dictionary::new();
+        cpu.insert(
+            "architecture".to_string(),
+            Value::String("arm64".to_string()),
+        );
+        cpu.insert(
+            "marketing_name".to_string(),
+            Value::String("Test CPU".to_string()),
+        );
+        cpu.insert("fixed_counters".to_string(), Value::Integer(2.into()));
+        cpu.insert("config_counters".to_string(), Value::Integer(8.into()));
+        cpu.insert("events".to_string(), Value::Dictionary(events_dict));
+        cpu.insert("aliases".to_string(), Value::Dictionary(alias_dict));
+
+        let mut system = Dictionary::new();
+        system.insert("cpu".to_string(), Value::Dictionary(cpu));
+
+        let mut root = Dictionary::new();
+        root.insert("name".to_string(), Value::String("test_db".to_string()));
+        root.insert("system".to_string(), Value::Dictionary(system));
+
+        Value::Dictionary(root)
+    }
+
+    #[test]
+    fn parse_minimal_database() {
+        let plist = build_test_plist(vec![("TEST_EVENT", Some(42), None)], vec![]);
+        let db = KpepDatabase::parse(plist).unwrap();
+
+        assert_eq!(db.name, "test_db");
+        assert_eq!(db.cpu.marketing_name, "Test CPU");
+        assert_eq!(db.cpu.architecture, "arm64");
+        assert_eq!(db.cpu.fixed_counters, 2);
+        assert_eq!(db.cpu.config_counters, 8);
+        assert_eq!(db.events().len(), 1);
+        assert_eq!(db.events()[0].name, "TEST_EVENT");
+        assert_eq!(db.events()[0].number, Some(42));
+    }
+
+    #[test]
+    fn parse_mixed_fixed_and_configurable() {
+        let plist = build_test_plist(
+            vec![
+                ("FIXED_CYCLES", None, Some(0)),
+                ("FIXED_INSTRUCTIONS", None, Some(1)),
+                ("L1D_MISS", Some(10), None),
+                ("BRANCH_MISS", Some(20), None),
+            ],
+            vec![],
+        );
+        let db = KpepDatabase::parse(plist).unwrap();
+
+        let fixed: Vec<_> = db.fixed_events().collect();
+        let config: Vec<_> = db.configurable_events().collect();
+
+        assert_eq!(fixed.len(), 2);
+        assert_eq!(config.len(), 2);
+    }
+
+    #[test]
+    fn event_by_name_direct_lookup() {
+        let plist = build_test_plist(vec![("L1D_MISS", Some(10), None)], vec![]);
+        let db = KpepDatabase::parse(plist).unwrap();
+
+        assert!(db.event_by_name("L1D_MISS").is_some());
+        assert!(db.event_by_name("NONEXISTENT").is_none());
+    }
+
+    #[test]
+    fn event_by_name_resolves_alias() {
+        let plist = build_test_plist(
+            vec![("FIXED_CYCLES", None, Some(0))],
+            vec![("Cycles", "FIXED_CYCLES")],
+        );
+        let db = KpepDatabase::parse(plist).unwrap();
+
+        let event = db.event_by_name("Cycles").unwrap();
+        assert_eq!(event.name, "FIXED_CYCLES");
+    }
+
+    #[test]
+    fn events_sorted_by_name() {
+        let plist = build_test_plist(
+            vec![
+                ("ZEBRA", Some(3), None),
+                ("ALPHA", Some(1), None),
+                ("MIDDLE", Some(2), None),
+            ],
+            vec![],
+        );
+        let db = KpepDatabase::parse(plist).unwrap();
+
+        let names: Vec<_> = db.events().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["ALPHA", "MIDDLE", "ZEBRA"]);
+    }
+
+    #[test]
+    fn parse_rejects_non_dict_root() {
+        let result = KpepDatabase::parse(Value::String("not a dict".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_current_cpu_succeeds() {
+        // This test runs on macOS Apple Silicon only. It verifies the full
+        // path: sysctl → find plist → parse events.
+        let db = KpepDatabase::load_current_cpu().unwrap();
+        assert!(!db.events().is_empty());
+        assert!(db.cpu.fixed_counters > 0);
+        assert!(db.cpu.config_counters > 0);
     }
 }
