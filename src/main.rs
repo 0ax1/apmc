@@ -311,18 +311,19 @@ fn cmd_stat(
         mgr.delta(&zero, &snap)
     };
 
-    print_results(&mgr, &delta, cmd_args, elapsed, status);
+    print_results(&mgr, &delta, &events, cmd_args, elapsed, status);
     Ok(())
 }
 
 /// Format and print counter results to stderr.
 ///
 /// Always prints cycles and instructions (from fixed counters) with IPC,
-/// followed by each configured event's value, wall-clock time, and
-/// exit status if the command failed.
+/// followed by each configured event's value and description, wall-clock
+/// time, and exit status if the command failed.
 fn print_results(
     mgr: &KpcManager,
     delta: &apmc::kpc::CounterDelta,
+    events: &[&apmc::kpep::KpepEvent],
     cmd_args: &[String],
     elapsed: std::time::Duration,
     status: std::process::ExitStatus,
@@ -346,7 +347,16 @@ fn print_results(
     eprintln!();
 
     for (name, value) in &labeled {
-        eprintln!("  {:>20}  {}", fmt_comma(*value), name);
+        let desc = events
+            .iter()
+            .find(|e| e.name == *name)
+            .map(|e| e.description.as_str())
+            .unwrap_or("");
+        if desc.is_empty() {
+            eprintln!("  {:>20}  {}", fmt_comma(*value), name);
+        } else {
+            eprintln!("  {:>20}  {}  # {}", fmt_comma(*value), name, desc);
+        }
     }
 
     eprintln!("\n  {:>16.6} seconds wall clock", elapsed.as_secs_f64());
