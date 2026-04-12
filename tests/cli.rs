@@ -100,7 +100,7 @@ fn stat_per_process_runs_true() {
 #[test]
 #[ignore] // Requires root
 fn stat_system_wide_runs_true() {
-    let output = apmc().args(["stat", "-S", "--", "true"]).output().unwrap();
+    let output = apmc().args(["stat", "-s", "--", "true"]).output().unwrap();
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("cycles"));

@@ -94,7 +94,7 @@ enum Commands {
         events: Option<Vec<String>>,
 
         /// Use system-wide counting instead of per-process.
-        #[arg(short = 'S', long = "system-wide")]
+        #[arg(short = 's', long = "system-wide")]
         system_wide: bool,
 
         /// Command and arguments to run.
