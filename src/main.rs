@@ -94,10 +94,10 @@ fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     println!("\nConfigurable events:");
     let mut count = 0;
     for event in db.configurable_events() {
-        if let Some(f) = filter {
-            let f_lower = f.to_lowercase();
-            if !event.name.to_lowercase().contains(&f_lower)
-                && !event.description.to_lowercase().contains(&f_lower)
+        if let Some(pattern) = filter {
+            let pattern_lower = pattern.to_lowercase();
+            if !event.name.to_lowercase().contains(&pattern_lower)
+                && !event.description.to_lowercase().contains(&pattern_lower)
             {
                 continue;
             }
@@ -228,14 +228,14 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    let before_sw = mgr.read_system_wide()?;
-    let t0 = Instant::now();
+    let before_system_wide = mgr.read_system_wide()?;
+    let start_time = Instant::now();
 
     let mut child = cmd.spawn()?;
     unsafe { libc::close(pipe_write) };
 
     let status = child.wait()?;
-    let elapsed = t0.elapsed();
+    let elapsed = start_time.elapsed();
 
     // Use per-process results if available, otherwise fall back to system-wide.
     let delta = match read_inject_results(pipe_read, mgr.n_fixed()) {
@@ -247,12 +247,10 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             mgr.delta(&zero, &snap)
         }
         None => {
-            let after = mgr.read_system_wide()?;
-            mgr.delta(&before_sw, &after)
+            let after_system_wide = mgr.read_system_wide()?;
+            mgr.delta(&before_system_wide, &after_system_wide)
         }
     };
-    unsafe { libc::close(pipe_read) };
-
     let labeled = mgr.labeled_counters(&delta);
 
     let cmd_display = cmd_args.join(" ");
@@ -320,15 +318,17 @@ fn read_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnap
     let mut file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
     let file: &mut std::fs::File = &mut file;
 
-    let mut n_buf = [0u8; 4];
-    file.read_exact(&mut n_buf).ok()?;
-    let n = u32::from_ne_bytes(n_buf) as usize;
-    if n == 0 || n > 16 {
+    let mut count_buf = [0u8; 4];
+    file.read_exact(&mut count_buf).ok()?;
+    let counter_count = u32::from_ne_bytes(count_buf) as usize;
+    if counter_count == 0 || counter_count > 16 {
         return None;
     }
 
-    let mut values = vec![0u64; n];
-    let bytes = unsafe { std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, n * 8) };
+    let mut values = vec![0u64; counter_count];
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, counter_count * 8)
+    };
     file.read_exact(bytes).ok()?;
 
     Some(apmc::kpc::CounterSnapshot { values, n_fixed })

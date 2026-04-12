@@ -188,8 +188,11 @@ impl KpcManager {
     /// Only configurable (non-fixed) events can be programmed. Fixed counters
     /// (cycles, instructions) are always available.
     pub fn configure(&mut self, events: &[&KpepEvent]) -> Result<(), KpcError> {
-        let configurable: Vec<_> =
-            events.iter().copied().filter(|e| e.is_configurable()).collect();
+        let configurable: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|e| e.is_configurable())
+            .collect();
         if configurable.len() > self.n_config {
             return Err(KpcError::TooManyEvents {
                 requested: configurable.len(),

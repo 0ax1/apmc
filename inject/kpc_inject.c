@@ -28,8 +28,7 @@
 #include <string.h>
 #include <unistd.h>
 
-typedef int (*kpc_get_thread_counters_fn)(unsigned int tid, unsigned int count,
-                                         unsigned long long *buf);
+typedef int (*kpc_get_thread_counters_fn)(unsigned int tid, unsigned int count, unsigned long long *buf);
 typedef int (*kpc_get_counter_count_fn)(unsigned int classes);
 
 #define KPC_CLASS_FIXED (1 << 0)
@@ -71,8 +70,7 @@ static void collect_slot(int slot) {
         return;
     }
     int expected = SLOT_ACTIVE;
-    if (atomic_compare_exchange_strong(&g_slots[slot].state, &expected,
-                                       SLOT_COLLECTED)) {
+    if (atomic_compare_exchange_strong(&g_slots[slot].state, &expected, SLOT_COLLECTED)) {
         unsigned long long current[MAX_COUNTERS] = {0};
         g_get_thread_counters(0, g_total_counters, current);
         for (int idx = 0; idx < g_total_counters; ++idx) {
@@ -81,8 +79,12 @@ static void collect_slot(int slot) {
     }
 }
 
-// SIGUSR2 handler — fully async-signal-safe.
-// Uses only: __thread read, atomic CAS, Mach trap, atomic add/sub.
+// SIGUSR2 signal handler invoked on each live thread during process teardown.
+// Collects the calling thread's counter delta via collect_slot (read current
+// counters, subtract start snapshot, accumulate into g_accumulated), then
+// decrements g_pending_signals so the finalizer knows when all threads have
+// reported. Fully async-signal-safe — uses only __thread reads, atomic CAS,
+// a Mach trap (kpc_get_thread_counters), and atomic add/sub.
 static void collect_handler(int signal_number) {
     (void)signal_number;
     if (g_get_thread_counters) {
@@ -101,8 +103,7 @@ static void tls_destructor(void *arg) {
     }
 }
 
-static void thread_hook(unsigned int event, pthread_t thread, void *addr,
-                        size_t size) {
+static void thread_hook(unsigned int event, pthread_t thread, void *addr, size_t size) {
     if (g_get_thread_counters == NULL) {
         goto chain;
     }
@@ -119,6 +120,9 @@ static void thread_hook(unsigned int event, pthread_t thread, void *addr,
     }
 
 chain:
+    // Forward to any previously installed introspection hook so we don't
+    // break other DYLD_INSERT_LIBRARIES dylibs or runtime tooling that
+    // also monitors thread lifecycle events.
     if (g_previous_hook) {
         g_previous_hook(event, thread, addr, size);
     }
@@ -135,8 +139,7 @@ __attribute__((constructor)) static void kpc_inject_initialize(void) {
     }
     g_result_fd = atoi(result_fd_env);
 
-    void *kperf_handle = dlopen(
-        "/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_LAZY);
+    void *kperf_handle = dlopen("/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_LAZY);
     if (!kperf_handle) {
         return;
     }
@@ -195,8 +198,7 @@ __attribute__((destructor)) static void kpc_inject_finalize(void) {
     // Signal all live threads to collect their counters.
     thread_act_array_t threads = NULL;
     mach_msg_type_number_t thread_count = 0;
-    kern_return_t ret =
-        task_threads(mach_task_self(), &threads, &thread_count);
+    kern_return_t ret = task_threads(mach_task_self(), &threads, &thread_count);
 
     if (ret == KERN_SUCCESS && thread_count > 0) {
         mach_port_t current_thread = mach_thread_self();
@@ -233,8 +235,7 @@ __attribute__((destructor)) static void kpc_inject_finalize(void) {
         mach_port_deallocate(mach_task_self(), current_thread);
         // task_threads() allocates via Mach VM, not malloc — must use
         // vm_deallocate to free the out-of-line thread array.
-        vm_deallocate(mach_task_self(), (vm_address_t)threads,
-                      sizeof(thread_act_t) * thread_count);
+        vm_deallocate(mach_task_self(), (vm_address_t)threads, sizeof(thread_act_t) * thread_count);
     }
 
     // Write accumulated totals. Best-effort — partial writes are detected
