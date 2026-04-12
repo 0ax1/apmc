@@ -51,7 +51,7 @@ sudo apmc stat --no-color -- ./my_program
           0.121722 seconds wall clock
 ```
 
-Output is colored when stderr is a terminal (bold event names, dim values/descriptions). Disable with `--no-color` or the `NO_COLOR` environment variable.
+The `# …` descriptions next to each event are sourced from Apple's kpep database (`/usr/share/kpep/`). Output is colored when stderr is a terminal (bold event names, dim values/descriptions). Disable with `--no-color` or the `NO_COLOR` environment variable.
 
 ## How It Works
 
