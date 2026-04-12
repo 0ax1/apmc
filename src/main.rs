@@ -25,7 +25,7 @@ use apmc::kpc::KpcManager;
 use apmc::kpep::KpepDatabase;
 use clap::{Parser, Subcommand};
 
-/// Minimal libc bindings for pipe, signal, and fd manipulation.
+/// Minimal libc bindings for pipe, signal, fd manipulation, and tty detection.
 ///
 /// Using a private module avoids pulling in the full `libc` crate
 /// for a handful of POSIX functions.
@@ -35,6 +35,7 @@ mod libc {
         pub fn close(fd: i32) -> i32;
         pub fn fcntl(fd: i32, cmd: i32, ...) -> i32;
         pub fn signal(sig: i32, handler: usize) -> usize;
+        pub fn isatty(fd: i32) -> i32;
     }
     pub const F_GETFD: i32 = 1;
     pub const F_SETFD: i32 = 2;
@@ -42,6 +43,40 @@ mod libc {
     pub const SIGINT: i32 = 2;
     pub const SIGTERM: i32 = 15;
     pub const SIG_IGN: usize = 1;
+    pub const STDERR_FILENO: i32 = 2;
+}
+
+/// ANSI color/style codes. All resolve to empty strings when color is disabled.
+struct Style {
+    dim: &'static str,
+    bold: &'static str,
+    red: &'static str,
+    reset: &'static str,
+}
+
+const STYLE_ON: Style = Style {
+    dim: "\x1b[2m",
+    bold: "\x1b[1m",
+    red: "\x1b[31m",
+    reset: "\x1b[0m",
+};
+
+const STYLE_OFF: Style = Style {
+    dim: "",
+    bold: "",
+    red: "",
+    reset: "",
+};
+
+fn pick_style(no_color: bool) -> &'static Style {
+    if no_color || std::env::var_os("NO_COLOR").is_some() {
+        return &STYLE_OFF;
+    }
+    if unsafe { libc::isatty(libc::STDERR_FILENO) } != 0 {
+        &STYLE_ON
+    } else {
+        &STYLE_OFF
+    }
 }
 
 /// Default events measured when `-e` is not specified.
@@ -67,6 +102,10 @@ const DEFAULT_EVENTS: &[&str] = &[
     about = "Apple Silicon hardware performance counters"
 )]
 struct Cli {
+    /// Disable colored output.
+    #[arg(long = "no-color", global = true)]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -105,6 +144,7 @@ enum Commands {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let style = pick_style(cli.no_color);
 
     match cli.command {
         Commands::List { filter } => cmd_list(filter.as_deref()),
@@ -112,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             events,
             system_wide,
             command,
-        } => cmd_stat(events.unwrap_or_default(), system_wide, &command),
+        } => cmd_stat(events.unwrap_or_default(), system_wide, &command, style),
     }
 }
 
@@ -196,6 +236,7 @@ fn cmd_stat(
     event_names: Vec<String>,
     system_wide: bool,
     cmd_args: &[String],
+    style: &Style,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let db = KpepDatabase::load_current_cpu()?;
 
@@ -311,7 +352,7 @@ fn cmd_stat(
         mgr.delta(&zero, &snap)
     };
 
-    print_results(&mgr, &delta, &events, cmd_args, elapsed, status);
+    print_results(&mgr, &delta, &events, cmd_args, elapsed, status, style);
     Ok(())
 }
 
@@ -327,6 +368,7 @@ fn print_results(
     cmd_args: &[String],
     elapsed: std::time::Duration,
     status: std::process::ExitStatus,
+    s: &Style,
 ) {
     let labeled = mgr.labeled_counters(delta);
 
@@ -343,22 +385,33 @@ fn print_results(
     let comment_col = 26 + max_name_len;
 
     let print_line = |value_str: &str, name: &str, comment: &str| {
-        let prefix = format!("  {:>20}  {name}", value_str);
+        let value_part = format!("  {dim}{value_str:>20}{r}", dim = s.dim, r = s.reset);
+        let name_part = format!("{b}{name}{r}", b = s.bold, r = s.reset);
+        let prefix_len = 2 + 20 + 2 + name.len(); // plain-text width for alignment
         if comment.is_empty() {
-            eprintln!("{prefix}");
+            eprintln!("{value_part}  {name_part}");
         } else {
             // Strip parenthetical asides from descriptions to keep lines short.
             let short = match comment.find(" (") {
                 Some(pos) => comment[..pos].trim_end(),
                 None => comment,
             };
-            let pad = comment_col.saturating_sub(prefix.len()).max(2);
-            eprintln!("{prefix}{:pad$}# {short}", "");
+            let pad = comment_col.saturating_sub(prefix_len).max(2);
+            eprintln!(
+                "{value_part}  {name_part}{:pad$}{dim}# {short}{r}",
+                "",
+                dim = s.dim,
+                r = s.reset,
+            );
         }
     };
 
     let cmd_display = cmd_args.join(" ");
-    eprintln!("\n Performance counter stats for '{cmd_display}':\n");
+    eprintln!(
+        "\n {b}Performance counter stats for '{cmd_display}':{r}\n",
+        b = s.bold,
+        r = s.reset,
+    );
 
     print_line(&fmt_comma(delta.cycles), "cycles", "");
     let ipc = if delta.cycles > 0 {
@@ -382,9 +435,19 @@ fn print_results(
         print_line(&fmt_comma(*value), name, desc);
     }
 
-    eprintln!("\n  {:>16.6} seconds wall clock", elapsed.as_secs_f64());
+    eprintln!(
+        "\n  {dim}{:>16.6} seconds wall clock{r}",
+        elapsed.as_secs_f64(),
+        dim = s.dim,
+        r = s.reset,
+    );
     if !status.success() {
-        eprintln!("  (exit status {:?})", status.code());
+        eprintln!(
+            "  {red}(exit status {:?}){r}",
+            status.code(),
+            red = s.red,
+            r = s.reset,
+        );
     }
     eprintln!();
 }
