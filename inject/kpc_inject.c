@@ -6,6 +6,8 @@
 //   - pthread_key destructor fires on natural thread termination (spawn/join)
 //   - SIGUSR2 handler collects counters from live threads at exit (thread pools)
 //   - CAS on slot state ensures exactly-once collection regardless of mechanism
+//   - pthread_atfork child handler resets state after fork-without-exec, so each
+//     descendant process accumulates and reports its own counters independently
 //
 // All operations in the signal handler are async-signal-safe:
 //   __thread read, atomic CAS, kpc_get_thread_counters (Mach trap), atomic add.
@@ -128,6 +130,50 @@ chain:
     }
 }
 
+// pthread_atfork child handler — runs in the child process immediately after
+// fork(). Resets all dylib state so the child accumulates only its own work
+// and writes an independent result message to the inherited pipe fd.
+// This handles programs like `stress` that fork workers without exec().
+static void atfork_child(void) {
+    if (!g_get_thread_counters || g_result_fd < 0) {
+        return;
+    }
+
+    // Zero accumulated counters — parent's totals belong to the parent.
+    for (int idx = 0; idx < MAX_COUNTERS; ++idx) {
+        atomic_store(&g_accumulated[idx], 0);
+    }
+
+    // Mark all inherited slots as collected so the destructor won't try
+    // to collect stale parent snapshots.
+    int n_slots = atomic_load(&g_next_slot);
+    for (int idx = 0; idx < n_slots && idx < MAX_THREAD_SLOTS; ++idx) {
+        atomic_store(&g_slots[idx].state, SLOT_COLLECTED);
+    }
+
+    // Reset slot allocator and pending signal count.
+    atomic_store(&g_next_slot, 0);
+    atomic_store(&g_pending_signals, 0);
+
+    // Re-create pthread key for this process (only one thread exists
+    // after fork, so the old key's destructor state is stale).
+    pthread_key_delete(g_tls_key);
+    pthread_key_create(&g_tls_key, tls_destructor);
+
+    // Snapshot the (only) thread's counters fresh.
+    int slot = atomic_fetch_add(&g_next_slot, 1);
+    if (slot < MAX_THREAD_SLOTS) {
+        t_my_slot = slot;
+        g_get_thread_counters(0, g_total_counters, g_slots[slot].start);
+        atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
+        pthread_setspecific(g_tls_key, (void *)(intptr_t)(slot + 1));
+    }
+
+    // Note: the pthread introspection hook and SIGUSR2 handler are inherited
+    // across fork and remain valid — do NOT re-install them, as that would
+    // set g_previous_hook to thread_hook itself, creating infinite recursion.
+}
+
 // Dylib constructor — runs when DYLD_INSERT_LIBRARIES loads this dylib into
 // the target process. Resolves kperf symbols, installs the pthread introspection
 // hook to capture thread starts, registers a SIGUSR2 handler for collecting
@@ -184,6 +230,10 @@ __attribute__((constructor)) static void kpc_inject_initialize(void) {
     }
 
     g_previous_hook = pthread_introspection_hook_install(thread_hook);
+
+    // Register fork handler so child processes reset state and report
+    // their own counters independently.
+    pthread_atfork(NULL, NULL, atfork_child);
 }
 
 // Dylib destructor — runs during process teardown. Collects the main thread's
@@ -241,17 +291,21 @@ __attribute__((destructor)) static void kpc_inject_finalize(void) {
         vm_deallocate(mach_task_self(), (vm_address_t)threads, sizeof(thread_act_t) * thread_count);
     }
 
-    // Write accumulated totals. Best-effort — partial writes are detected
-    // by the reader (it checks exact byte counts via read_exact).
+    // Write accumulated totals as a single atomic write. Multiple processes
+    // (fork children) may write to the same pipe concurrently — a single
+    // write() up to PIPE_BUF (>=512 on macOS) is guaranteed atomic.
+    // Max payload: 4 + 16*8 = 132 bytes, well under PIPE_BUF.
     unsigned long long totals[MAX_COUNTERS];
     for (int idx = 0; idx < g_total_counters; ++idx) {
         totals[idx] = atomic_load(&g_accumulated[idx]);
     }
 
+    unsigned char msg[sizeof(unsigned int) + MAX_COUNTERS * sizeof(unsigned long long)];
     unsigned int counter_count = (unsigned int)g_total_counters;
-    ssize_t written = write(g_result_fd, &counter_count, sizeof(counter_count));
-    if (written == (ssize_t)sizeof(counter_count)) {
-        write(g_result_fd, totals, sizeof(unsigned long long) * g_total_counters);
-    }
+    memcpy(msg, &counter_count, sizeof(counter_count));
+    memcpy(msg + sizeof(counter_count), totals,
+           sizeof(unsigned long long) * g_total_counters);
+    size_t msg_len = sizeof(counter_count) + sizeof(unsigned long long) * g_total_counters;
+    write(g_result_fd, msg, msg_len);
     close(g_result_fd);
 }

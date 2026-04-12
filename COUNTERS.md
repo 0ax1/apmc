@@ -123,5 +123,5 @@ Always active, not programmable.
 
 - **Speculative vs Non-speculative**: Events ending in `_NONSPEC` count only architecturally retired operations. Events without that suffix may include speculative operations that were later squashed.
 - **counters_mask**: The kernel rejects events programmed into invalid slots. `kpc` handles slot assignment automatically.
-- **Per-process**: `apmc stat` measures counters for the target process only, not system-wide. Background system activity does not contribute noise.
+- **Per-process**: `apmc stat` measures counters for the target process and its descendants, not system-wide. Background system activity does not contribute noise.
 - **Root required**: Programming configurable counters requires `sudo`. The `apmc list` command works without root.

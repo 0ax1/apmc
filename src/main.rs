@@ -9,7 +9,8 @@
 //!
 //! **Per-process** (default): A dylib is injected via `DYLD_INSERT_LIBRARIES`
 //! that uses `pthread_introspection_hook` to track thread lifecycle and
-//! accumulates per-thread counter deltas. Results reflect only the target process.
+//! accumulates per-thread counter deltas. Results include the target process
+//! and all descendant processes (via `pthread_atfork` and environment inheritance).
 //!
 //! **System-wide** (`-S`): Reads global counters summed across all CPUs before
 //! and after the command. Includes background system activity.
@@ -328,7 +329,7 @@ fn cmd_stat(
     }
 
     // Close the parent's copy of the pipe write end so reads see EOF
-    // when the child exits.
+    // when all descendants have exited and closed their inherited fds.
     if let Some((_, pipe_write)) = pipe_fds {
         unsafe { libc::close(pipe_write) };
     }
@@ -346,7 +347,7 @@ fn cmd_stat(
         // snapshot values ARE the deltas. Diff against a zeroed snapshot to
         // produce a CounterDelta struct.
         let pipe_read = pipe_fds.unwrap().0;
-        let snap = read_inject_results(pipe_read, mgr.n_fixed())
+        let snap = read_all_inject_results(pipe_read, mgr.n_fixed())
             .ok_or("per-process counting failed: no results from inject dylib")?;
         let zero = apmc::kpc::CounterSnapshot {
             values: vec![0u64; snap.values.len()],
@@ -492,26 +493,51 @@ fn write_embedded_dylib() -> Result<std::path::PathBuf, Box<dyn std::error::Erro
 
 /// Read per-process counter results written by `libapmc_inject.dylib`.
 ///
-/// Wire protocol: `u32` counter count, then `count * u64` delta values.
-/// Returns `None` on EOF, short read, or invalid count (0 or >16).
+/// Multiple processes (the target and any fork children) may each write an
+/// independent result message to the same pipe. Each message is:
+/// `u32` counter count, then `count * u64` delta values — written as a
+/// single atomic `write()` (total ≤132 bytes, well under `PIPE_BUF`).
+///
+/// Reads all messages until EOF and returns the element-wise sum.
+/// Returns `None` if no valid messages were received.
 /// Takes ownership of `fd` via `File::from_raw_fd` (closed on drop).
-fn read_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnapshot> {
+fn read_all_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnapshot> {
     let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
+    let mut accumulated: Option<Vec<u64>> = None;
 
-    let mut count_buf = [0u8; 4];
-    file.read_exact(&mut count_buf).ok()?;
-    let counter_count = u32::from_ne_bytes(count_buf) as usize;
-    if counter_count == 0 || counter_count > 16 {
-        return None;
+    loop {
+        let mut count_buf = [0u8; 4];
+        match file.read_exact(&mut count_buf) {
+            Ok(()) => {}
+            Err(_) => break, // EOF or error — done reading.
+        }
+        let counter_count = u32::from_ne_bytes(count_buf) as usize;
+        if counter_count == 0 || counter_count > 16 {
+            break; // Corrupt message; stop.
+        }
+
+        let mut values = vec![0u64; counter_count];
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, counter_count * 8)
+        };
+        match file.read_exact(bytes) {
+            Ok(()) => {}
+            Err(_) => break, // Truncated message; discard.
+        }
+
+        match &mut accumulated {
+            None => accumulated = Some(values),
+            Some(acc) => {
+                if acc.len() == values.len() {
+                    for (a, v) in acc.iter_mut().zip(values.iter()) {
+                        *a = a.wrapping_add(*v);
+                    }
+                }
+            }
+        }
     }
 
-    let mut values = vec![0u64; counter_count];
-    let bytes = unsafe {
-        std::slice::from_raw_parts_mut(values.as_mut_ptr() as *mut u8, counter_count * 8)
-    };
-    file.read_exact(bytes).ok()?;
-
-    Some(apmc::kpc::CounterSnapshot { values, n_fixed })
+    accumulated.map(|values| apmc::kpc::CounterSnapshot { values, n_fixed })
 }
 
 #[cfg(test)]
@@ -559,8 +585,34 @@ mod tests {
         }
         drop(write_file); // closes write_fd
 
-        let snap = read_inject_results(read_fd, 2).unwrap();
+        let snap = read_all_inject_results(read_fd, 2).unwrap();
         assert_eq!(snap.values, vec![100, 200, 300]);
+        assert_eq!(snap.n_fixed, 2);
+    }
+
+    #[test]
+    fn pipe_roundtrip_multiple_messages() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        let (read_fd, write_fd) = create_pipe().unwrap();
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+
+        // Simulate three child processes each writing a result message.
+        for multiplier in [1u64, 2, 3] {
+            let counter_count: u32 = 3;
+            write_file.write_all(&counter_count.to_ne_bytes()).unwrap();
+            for &val in &[100u64, 200, 300] {
+                write_file
+                    .write_all(&(val * multiplier).to_ne_bytes())
+                    .unwrap();
+            }
+        }
+        drop(write_file);
+
+        let snap = read_all_inject_results(read_fd, 2).unwrap();
+        // 100*(1+2+3)=600, 200*(1+2+3)=1200, 300*(1+2+3)=1800
+        assert_eq!(snap.values, vec![600, 1200, 1800]);
         assert_eq!(snap.n_fixed, 2);
     }
 
@@ -569,7 +621,7 @@ mod tests {
         let (read_fd, write_fd) = create_pipe().unwrap();
         unsafe { libc::close(write_fd) };
 
-        assert!(read_inject_results(read_fd, 2).is_none());
+        assert!(read_all_inject_results(read_fd, 2).is_none());
     }
 
     #[test]
@@ -582,7 +634,7 @@ mod tests {
         write_file.write_all(&0u32.to_ne_bytes()).unwrap();
         drop(write_file);
 
-        assert!(read_inject_results(read_fd, 2).is_none());
+        assert!(read_all_inject_results(read_fd, 2).is_none());
     }
 
     #[test]
@@ -595,7 +647,29 @@ mod tests {
         write_file.write_all(&17u32.to_ne_bytes()).unwrap();
         drop(write_file);
 
-        assert!(read_inject_results(read_fd, 2).is_none());
+        assert!(read_all_inject_results(read_fd, 2).is_none());
+    }
+
+    #[test]
+    fn inject_results_valid_then_truncated_returns_valid() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        let (read_fd, write_fd) = create_pipe().unwrap();
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+
+        // First message: complete.
+        let counter_count: u32 = 2;
+        write_file.write_all(&counter_count.to_ne_bytes()).unwrap();
+        write_file.write_all(&50u64.to_ne_bytes()).unwrap();
+        write_file.write_all(&60u64.to_ne_bytes()).unwrap();
+
+        // Second message: header only, no data (simulates crashed child).
+        write_file.write_all(&counter_count.to_ne_bytes()).unwrap();
+        drop(write_file);
+
+        let snap = read_all_inject_results(read_fd, 2).unwrap();
+        assert_eq!(snap.values, vec![50, 60]);
     }
 
     #[test]
@@ -610,6 +684,6 @@ mod tests {
         write_file.write_all(&42u64.to_ne_bytes()).unwrap();
         drop(write_file);
 
-        assert!(read_inject_results(read_fd, 2).is_none());
+        assert!(read_all_inject_results(read_fd, 2).is_none());
     }
 }

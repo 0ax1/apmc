@@ -58,7 +58,7 @@ The `# …` descriptions next to each event are sourced from Apple's kpep databa
 1. **Event discovery**: Parses Apple's kpep database at `/usr/share/kpep/` (binary plists describing all PMC events for each CPU)
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
-4. **Per-process measurement** (default): A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools
+4. **Per-process measurement** (default): A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools. Descendant processes (fork children) are tracked automatically via `pthread_atfork`
 
 ## Architecture
 

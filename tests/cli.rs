@@ -150,3 +150,4 @@ fn extract_event_count(output: &str) -> usize {
     }
     0
 }
+
