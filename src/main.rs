@@ -1,3 +1,21 @@
+//! CLI for reading Apple Silicon hardware performance counters.
+//!
+//! Two subcommands:
+//! - **`list`**: Discover available PMC events for the current CPU by reading
+//!   the kpep database at `/usr/share/kpep/`.
+//! - **`stat`**: Measure hardware performance counters while running a command.
+//!
+//! ## Counting modes
+//!
+//! **Per-process** (default): A dylib is injected via `DYLD_INSERT_LIBRARIES`
+//! that uses `pthread_introspection_hook` to track thread lifecycle and
+//! accumulates per-thread counter deltas. Results reflect only the target process.
+//!
+//! **System-wide** (`-S`): Reads global counters summed across all CPUs before
+//! and after the command. Includes background system activity.
+//!
+//! Both modes require root privileges (`sudo`) for counter access.
+
 use std::io::Read as _;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -5,7 +23,12 @@ use std::time::Instant;
 
 use apmc::kpc::KpcManager;
 use apmc::kpep::KpepDatabase;
+use clap::{Parser, Subcommand};
 
+/// Minimal libc bindings for pipe, signal, and fd manipulation.
+///
+/// Using a private module avoids pulling in the full `libc` crate
+/// for a handful of POSIX functions.
 mod libc {
     extern "C" {
         pub fn pipe(fds: *mut [i32; 2]) -> i32;
@@ -18,10 +41,13 @@ mod libc {
     pub const FD_CLOEXEC: i32 = 1;
     pub const SIGINT: i32 = 2;
     pub const SIGTERM: i32 = 15;
-    pub const SIG_DFL: usize = 0;
     pub const SIG_IGN: usize = 1;
 }
 
+/// Default events measured when `-e` is not specified.
+///
+/// Chosen to cover the most common performance bottlenecks on Apple Silicon:
+/// cache misses, branch mispredictions, pipeline stalls, and SIMD utilization.
 const DEFAULT_EVENTS: &[&str] = &[
     "L1D_CACHE_MISS_LD",
     "L1D_CACHE_MISS_ST",
@@ -33,40 +59,71 @@ const DEFAULT_EVENTS: &[&str] = &[
     "SCHEDULE_EMPTY",
 ];
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+/// Apple Silicon hardware performance counters.
+#[derive(Parser)]
+#[command(
+    name = "apmc",
+    version,
+    about = "Apple Silicon hardware performance counters"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
 
-    match args.get(1).map(|s| s.as_str()) {
-        Some("list") => cmd_list(&args[2..]),
-        Some("stat") => cmd_stat(&args[2..]),
-        Some("help") | Some("--help") | Some("-h") => {
-            print_usage();
-            Ok(())
-        }
-        _ => {
-            print_usage();
-            std::process::exit(1);
-        }
+#[derive(Subcommand)]
+enum Commands {
+    /// List available PMC events for the current CPU.
+    List {
+        /// Case-insensitive filter applied to event names and descriptions.
+        filter: Option<String>,
+    },
+
+    /// Measure hardware counters for a command (requires sudo).
+    #[command(
+        trailing_var_arg = true,
+        after_help = concat!(
+            "Default events: L1D_CACHE_MISS_LD, L1D_CACHE_MISS_ST, ATOMIC_OR_EXCLUSIVE_FAIL,\n",
+            "  MAP_STALL, LDST_X64_UOP, BRANCH_MISPRED_NONSPEC, MAP_SIMD_UOP, SCHEDULE_EMPTY\n\n",
+            "Run `apmc list` to see all available events.",
+        )
+    )]
+    Stat {
+        /// Comma-separated list of events to monitor.
+        #[arg(short = 'e', long = "events", value_delimiter = ',')]
+        events: Option<Vec<String>>,
+
+        /// Use system-wide counting instead of per-process.
+        #[arg(short = 'S', long = "system-wide")]
+        system_wide: bool,
+
+        /// Command and arguments to run.
+        #[arg(required = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::List { filter } => cmd_list(filter.as_deref()),
+        Commands::Stat {
+            events,
+            system_wide,
+            command,
+        } => cmd_stat(events.unwrap_or_default(), system_wide, &command),
     }
 }
 
-fn print_usage() {
-    eprintln!("apmc — Apple Silicon hardware performance counters\n");
-    eprintln!("Usage:");
-    eprintln!("  apmc list [filter]                                    List available PMC events");
-    eprintln!(
-        "  apmc stat [-e EVT1,EVT2,...] [-S] [--] <cmd> [args...]  Measure counters for a command"
-    );
-    eprintln!("  apmc help                                             Show this help\n");
-    eprintln!("Options:");
-    eprintln!("  -e, --events EVT1,EVT2,...   Comma-separated list of events to monitor");
-    eprintln!("  -S, --system-wide            System-wide counting instead of per-process\n");
-    eprintln!("The stat subcommand requires root (sudo).");
-}
-
-fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+/// List all PMC events available on the current CPU.
+///
+/// Reads the kpep database from `/usr/share/kpep/` and prints fixed counters,
+/// configurable events, aliases, and counter slot masks. When `filter` is
+/// provided, only events whose name or description matches (case-insensitive)
+/// are shown.
+fn cmd_list(filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     let db = KpepDatabase::load_current_cpu()?;
-    let filter = args.first();
 
     println!("CPU: {} ({})", db.cpu.marketing_name, db.cpu.architecture);
     println!(
@@ -125,50 +182,33 @@ fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut event_names: Vec<String> = Vec::new();
-    let mut system_wide = false;
-    let mut cmd_start = 0;
-
-    let mut arg_idx = 0;
-    while arg_idx < args.len() {
-        if args[arg_idx] == "--events" || args[arg_idx] == "-e" {
-            arg_idx += 1;
-            if arg_idx < args.len() {
-                event_names = args[arg_idx].split(',').map(|s| s.to_string()).collect();
-            }
-            arg_idx += 1;
-        } else if args[arg_idx] == "--system-wide" || args[arg_idx] == "-S" {
-            system_wide = true;
-            arg_idx += 1;
-        } else if args[arg_idx] == "--" {
-            cmd_start = arg_idx + 1;
-            break;
-        } else {
-            cmd_start = arg_idx;
-            break;
-        }
-    }
-
-    if cmd_start >= args.len() {
-        eprintln!("Usage: sudo apmc stat [-e EVT1,EVT2,...] [-S] [--] <command> [args...]");
-        eprintln!("\nDefault events: {}", DEFAULT_EVENTS.join(", "));
-        eprintln!("\nRun `apmc list` to see all available events.");
-        std::process::exit(1);
-    }
-
-    let cmd_args = &args[cmd_start..];
-
+/// Measure hardware performance counters while running a command.
+///
+/// In per-process mode (default), injects `libapmc_inject.dylib` via
+/// `DYLD_INSERT_LIBRARIES`. The dylib hooks thread creation/destruction to
+/// accumulate per-thread counter deltas, then writes results back through a
+/// pipe fd at process exit.
+///
+/// In system-wide mode (`-S`), reads global counters summed across all CPUs
+/// before and after the child process runs. The child drops root privileges
+/// when `SUDO_UID`/`SUDO_GID` environment variables are set.
+fn cmd_stat(
+    event_names: Vec<String>,
+    system_wide: bool,
+    cmd_args: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
     let db = KpepDatabase::load_current_cpu()?;
 
-    if event_names.is_empty() {
-        event_names = DEFAULT_EVENTS.iter().map(|s| s.to_string()).collect();
-    }
+    let event_names: Vec<String> = if event_names.is_empty() {
+        DEFAULT_EVENTS.iter().map(|s| s.to_string()).collect()
+    } else {
+        event_names
+    };
 
     let mut events = Vec::new();
     for name in &event_names {
         match db.event_by_name(name) {
-            Some(e) => events.push(e),
+            Some(event) => events.push(event),
             None => eprintln!("Warning: unknown event '{name}', skipping"),
         }
     }
@@ -192,50 +232,9 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd = Command::new(&cmd_args[0]);
     cmd.args(&cmd_args[1..]);
 
-    // Ignore SIGINT/SIGTERM in parent so we survive Ctrl+C and collect
-    // results after the child exits. KpcManager::drop releases counters.
-    unsafe {
-        libc::signal(libc::SIGINT, libc::SIG_IGN);
-        libc::signal(libc::SIGTERM, libc::SIG_IGN);
-    }
-
-    if !system_wide {
-        // Per-process mode (default): inject a dylib that tracks per-thread counters.
-        let dylib_path = write_embedded_dylib()?;
-        let (pipe_read, pipe_write) = pipe()?;
-
-        cmd.env("DYLD_INSERT_LIBRARIES", &dylib_path);
-        cmd.env("KPC_RESULT_FD", pipe_write.to_string());
-        unsafe {
-            cmd.pre_exec(move || {
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
-                let flags = libc::fcntl(pipe_write, libc::F_GETFD);
-                libc::fcntl(pipe_write, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-                Ok(())
-            });
-        }
-
-        let start_time = Instant::now();
-        let mut child = cmd.spawn()?;
-        unsafe { libc::close(pipe_write) };
-        let status = child.wait()?;
-        let elapsed = start_time.elapsed();
-
-        // The inject dylib accumulates per-thread deltas, so the snapshot
-        // values are already deltas. Compute delta against a zeroed snapshot
-        // (identity op) to produce a CounterDelta.
-        let snap = read_inject_results(pipe_read, mgr.n_fixed())
-            .ok_or("per-process counting failed: no results from inject dylib")?;
-        let zero = apmc::kpc::CounterSnapshot {
-            values: vec![0u64; snap.values.len()],
-            n_fixed: snap.n_fixed,
-        };
-        let delta = mgr.delta(&zero, &snap);
-        print_results(&mgr, &delta, cmd_args, elapsed, status);
-    } else {
-        // System-wide mode (opt-in via -S): read global counters before/after.
-        // Drop root for the child process when possible.
+    // Set up mode-specific configuration before spawning.
+    let pipe_fds = if system_wide {
+        // System-wide: drop root for the child process when possible.
         if let (Some(uid), Some(gid)) = (
             std::env::var("SUDO_UID")
                 .ok()
@@ -246,27 +245,81 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ) {
             cmd.uid(uid).gid(gid);
         }
+        None
+    } else {
+        // Per-process: inject dylib and set up a pipe for results.
+        let dylib_path = write_embedded_dylib()?;
+        let (pipe_read, pipe_write) = create_pipe()?;
+        cmd.env("DYLD_INSERT_LIBRARIES", &dylib_path);
+        cmd.env("KPC_RESULT_FD", pipe_write.to_string());
+        // Clear close-on-exec so the child (and its injected dylib) can write
+        // counter results back through this fd.
         unsafe {
-            cmd.pre_exec(|| {
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            cmd.pre_exec(move || {
+                let flags = libc::fcntl(pipe_write, libc::F_GETFD);
+                libc::fcntl(pipe_write, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
                 Ok(())
             });
         }
+        Some((pipe_read, pipe_write))
+    };
 
-        let before = mgr.read_system_wide()?;
-        let start_time = Instant::now();
-        let mut child = cmd.spawn()?;
-        let status = child.wait()?;
-        let elapsed = start_time.elapsed();
+    // Take a system-wide snapshot before spawning (only in system-wide mode).
+    let before = if system_wide {
+        Some(mgr.read_system_wide()?)
+    } else {
+        None
+    };
 
-        let after = mgr.read_system_wide()?;
-        let delta = mgr.delta(&before, &after);
-        print_results(&mgr, &delta, cmd_args, elapsed, status);
+    let start_time = Instant::now();
+    let mut child = cmd.spawn()?;
+
+    // Ignore SIGINT/SIGTERM in the parent AFTER fork. This way the child
+    // inherits default signal handling (Ctrl+C kills it normally) while the
+    // parent survives to collect and display results. The race window between
+    // spawn() and this call is microseconds — acceptable for a CLI tool.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
     }
+
+    // Close the parent's copy of the pipe write end so reads see EOF
+    // when the child exits.
+    if let Some((_, pipe_write)) = pipe_fds {
+        unsafe { libc::close(pipe_write) };
+    }
+
+    let status = child.wait()?;
+    let elapsed = start_time.elapsed();
+
+    // Compute counter deltas from the appropriate source.
+    let delta = if let Some(before) = before {
+        // System-wide: diff global counters before/after.
+        let after = mgr.read_system_wide()?;
+        mgr.delta(&before, &after)
+    } else {
+        // Per-process: the inject dylib accumulates per-thread deltas, so the
+        // snapshot values ARE the deltas. Diff against a zeroed snapshot to
+        // produce a CounterDelta struct.
+        let pipe_read = pipe_fds.unwrap().0;
+        let snap = read_inject_results(pipe_read, mgr.n_fixed())
+            .ok_or("per-process counting failed: no results from inject dylib")?;
+        let zero = apmc::kpc::CounterSnapshot {
+            values: vec![0u64; snap.values.len()],
+            n_fixed: snap.n_fixed,
+        };
+        mgr.delta(&zero, &snap)
+    };
+
+    print_results(&mgr, &delta, cmd_args, elapsed, status);
     Ok(())
 }
 
+/// Format and print counter results to stderr.
+///
+/// Always prints cycles and instructions (from fixed counters) with IPC,
+/// followed by each configured event's value, wall-clock time, and
+/// exit status if the command failed.
 fn print_results(
     mgr: &KpcManager,
     delta: &apmc::kpc::CounterDelta,
@@ -303,6 +356,7 @@ fn print_results(
     eprintln!();
 }
 
+/// Format a `u64` with comma-separated thousands (e.g., `1,234,567`).
 fn fmt_comma(value: u64) -> String {
     let digits = value.to_string();
     let mut result = String::new();
@@ -315,7 +369,8 @@ fn fmt_comma(value: u64) -> String {
     result.chars().rev().collect()
 }
 
-fn pipe() -> Result<(i32, i32), Box<dyn std::error::Error>> {
+/// Create a POSIX pipe, returning `(read_fd, write_fd)`.
+fn create_pipe() -> Result<(i32, i32), Box<dyn std::error::Error>> {
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(&mut fds) } != 0 {
         return Err("pipe() failed".into());
@@ -323,18 +378,24 @@ fn pipe() -> Result<(i32, i32), Box<dyn std::error::Error>> {
     Ok((fds[0], fds[1]))
 }
 
-/// Dylib bytes compiled by build.rs and embedded at compile time.
+/// Dylib bytes compiled by `build.rs` and embedded at compile time.
 const INJECT_DYLIB_BYTES: &[u8] = include_bytes!(env!("KPC_INJECT_DYLIB"));
 
-/// Write the embedded dylib to a temp file and return its path.
+/// Write the embedded inject dylib to a temp file and return its path.
+///
+/// The dylib is extracted to `/tmp/libapmc_inject.dylib` each run. This is
+/// necessary because `DYLD_INSERT_LIBRARIES` requires a filesystem path.
 fn write_embedded_dylib() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let path = std::env::temp_dir().join("libapmc_inject.dylib");
     std::fs::write(&path, INJECT_DYLIB_BYTES)?;
     Ok(path)
 }
 
-/// Read the per-process counter results written by libkpc_inject.dylib.
-/// Protocol: u32 n_counters, then n_counters × u64 delta values.
+/// Read per-process counter results written by `libapmc_inject.dylib`.
+///
+/// Wire protocol: `u32` counter count, then `count * u64` delta values.
+/// Returns `None` on EOF, short read, or invalid count (0 or >16).
+/// Takes ownership of `fd` via `File::from_raw_fd` (closed on drop).
 fn read_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnapshot> {
     let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
 
@@ -352,4 +413,104 @@ fn read_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnap
     file.read_exact(bytes).ok()?;
 
     Some(apmc::kpc::CounterSnapshot { values, n_fixed })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fmt_comma_zero() {
+        assert_eq!(fmt_comma(0), "0");
+    }
+
+    #[test]
+    fn fmt_comma_small() {
+        assert_eq!(fmt_comma(1), "1");
+        assert_eq!(fmt_comma(999), "999");
+    }
+
+    #[test]
+    fn fmt_comma_thousands() {
+        assert_eq!(fmt_comma(1_000), "1,000");
+        assert_eq!(fmt_comma(1_234_567), "1,234,567");
+        assert_eq!(fmt_comma(1_000_000_000), "1,000,000,000");
+    }
+
+    #[test]
+    fn fmt_comma_u64_max() {
+        let s = fmt_comma(u64::MAX);
+        assert!(s.contains(','));
+        // u64::MAX = 18,446,744,073,709,551,615
+        assert_eq!(s, "18,446,744,073,709,551,615");
+    }
+
+    #[test]
+    fn pipe_roundtrip_inject_protocol() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        let (read_fd, write_fd) = create_pipe().unwrap();
+
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        let counter_count: u32 = 3;
+        write_file.write_all(&counter_count.to_ne_bytes()).unwrap();
+        for &val in &[100u64, 200, 300] {
+            write_file.write_all(&val.to_ne_bytes()).unwrap();
+        }
+        drop(write_file); // closes write_fd
+
+        let snap = read_inject_results(read_fd, 2).unwrap();
+        assert_eq!(snap.values, vec![100, 200, 300]);
+        assert_eq!(snap.n_fixed, 2);
+    }
+
+    #[test]
+    fn inject_results_empty_pipe_returns_none() {
+        let (read_fd, write_fd) = create_pipe().unwrap();
+        unsafe { libc::close(write_fd) };
+
+        assert!(read_inject_results(read_fd, 2).is_none());
+    }
+
+    #[test]
+    fn inject_results_zero_count_returns_none() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        let (read_fd, write_fd) = create_pipe().unwrap();
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        write_file.write_all(&0u32.to_ne_bytes()).unwrap();
+        drop(write_file);
+
+        assert!(read_inject_results(read_fd, 2).is_none());
+    }
+
+    #[test]
+    fn inject_results_count_too_large_returns_none() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        let (read_fd, write_fd) = create_pipe().unwrap();
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        write_file.write_all(&17u32.to_ne_bytes()).unwrap();
+        drop(write_file);
+
+        assert!(read_inject_results(read_fd, 2).is_none());
+    }
+
+    #[test]
+    fn inject_results_truncated_data_returns_none() {
+        use std::io::Write;
+        use std::os::unix::io::FromRawFd;
+
+        let (read_fd, write_fd) = create_pipe().unwrap();
+        let mut write_file = unsafe { std::fs::File::from_raw_fd(write_fd) };
+        // Write count=2 but only one u64 value (incomplete)
+        write_file.write_all(&2u32.to_ne_bytes()).unwrap();
+        write_file.write_all(&42u64.to_ne_bytes()).unwrap();
+        drop(write_file);
+
+        assert!(read_inject_results(read_fd, 2).is_none());
+    }
 }
