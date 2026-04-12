@@ -23,34 +23,43 @@ sudo apmc stat -- sleep 1
 
 # Choose specific events
 sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
+
+# System-wide counting (includes background activity)
+sudo apmc stat -s -- ./my_program
+
+# Disable colored output
+sudo apmc stat --no-color -- ./my_program
 ```
 
 ## Example Output
 
 ```
- Performance counter stats for 'datafusion-bench tpch ...':
+ Performance counter stats for 'sleep 0.1':
 
-        24,531,787,227  cycles
-        58,130,536,158  instructions  # 2.37 insn per cycle
+             1,049,886  cycles
+             2,379,442  instructions              # 2.27 insn per cycle
 
-            77,463,891  BRANCH_MISPRED_NONSPEC
-         1,110,914,261  L1D_CACHE_MISS_LD
-         1,625,780,918  L1D_CACHE_MISS_ST
-                47,611  ATOMIC_OR_EXCLUSIVE_FAIL
-         8,737,883,140  MAP_STALL
-           334,101,420  LDST_X64_UOP
-         3,428,355,453  MAP_SIMD_UOP
-           534,447,924  SCHEDULE_EMPTY
+                 1,553  BRANCH_MISPRED_NONSPEC    # Instruction architecturally executed, mispredicted branch
+                 6,326  L1D_CACHE_MISS_LD         # Loads that missed the L1 Data Cache
+                 8,071  L1D_CACHE_MISS_ST         # Stores that missed the L1 Data Cache
+                     0  ATOMIC_OR_EXCLUSIVE_FAIL  # Atomic or exclusive instruction failed due to contention
+                54,808  MAP_STALL                 # Cycles while the Map Unit was stalled for any reason
+                   766  LDST_X64_UOP              # Load and store uops that crossed a 64B boundary
+                17,919  MAP_SIMD_UOP              # Mapped Advanced SIMD and FP Unit uops
+                29,623  SCHEDULE_EMPTY            # Cycles while the uop scheduler is empty
 
-          1.452434 seconds wall clock
+          0.121722 seconds wall clock
 ```
+
+Output is colored when stderr is a terminal (bold event names, dim values/descriptions). Disable with `--no-color` or the `NO_COLOR` environment variable.
 
 ## How It Works
 
 1. **Event discovery**: Parses Apple's kpep database at `/usr/share/kpep/` (binary plists describing all PMC events for each CPU)
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
-4. **Per-process measurement**: A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools.
+4. **Per-process measurement** (default): A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools
+5. **System-wide measurement** (`-s`): Reads global counters summed across all CPUs before and after the command
 
 ## Architecture
 
