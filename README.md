@@ -59,7 +59,6 @@ The `# …` descriptions next to each event are sourced from Apple's kpep databa
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
 4. **Per-process measurement** (default): A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools
-5. **System-wide measurement** (`-s`): Reads global counters summed across all CPUs before and after the command
 
 ## Architecture
 
