@@ -49,6 +49,7 @@ mod libc {
 /// ANSI color/style codes. All resolve to empty strings when color is disabled.
 struct Style {
     dim: &'static str,
+    blue: &'static str,
     bold: &'static str,
     red: &'static str,
     reset: &'static str,
@@ -56,6 +57,7 @@ struct Style {
 
 const STYLE_ON: Style = Style {
     dim: "\x1b[2m",
+    blue: "\x1b[34m",
     bold: "\x1b[1m",
     red: "\x1b[31m",
     reset: "\x1b[0m",
@@ -63,6 +65,7 @@ const STYLE_ON: Style = Style {
 
 const STYLE_OFF: Style = Style {
     dim: "",
+    blue: "",
     bold: "",
     red: "",
     reset: "",
@@ -385,7 +388,7 @@ fn print_results(
     let comment_col = 26 + max_name_len;
 
     let print_line = |value_str: &str, name: &str, comment: &str| {
-        let value_part = format!("  {dim}{value_str:>20}{r}", dim = s.dim, r = s.reset);
+        let value_part = format!("  {blue}{value_str:>20}{r}", blue = s.blue, r = s.reset);
         let name_part = format!("{b}{name}{r}", b = s.bold, r = s.reset);
         let prefix_len = 2 + 20 + 2 + name.len(); // plain-text width for alignment
         if comment.is_empty() {
