@@ -320,6 +320,9 @@ fn cmd_stat(
 /// Always prints cycles and instructions (from fixed counters) with IPC,
 /// followed by each configured event's value and description, wall-clock
 /// time, and exit status if the command failed.
+/// Maximum output line length. Lines with descriptions are truncated here.
+const LINE_LIMIT: usize = 130;
+
 fn print_results(
     mgr: &KpcManager,
     delta: &apmc::kpc::CounterDelta,
@@ -330,19 +333,42 @@ fn print_results(
 ) {
     let labeled = mgr.labeled_counters(delta);
 
+    // Find the longest name to right-align all `#` comments at the same column.
+    let max_name_len = ["cycles", "instructions"]
+        .iter()
+        .copied()
+        .chain(labeled.iter().map(|(name, _)| *name))
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0);
+
+    // "  " (2) + value (20) + "  " (2) + name + "  " (2) = comment column.
+    let comment_col = 26 + max_name_len;
+
+    let print_line = |value_str: &str, name: &str, comment: &str| {
+        let prefix = format!("  {:>20}  {name}", value_str);
+        if comment.is_empty() {
+            eprintln!("{prefix}");
+        } else {
+            let pad = comment_col.saturating_sub(prefix.len()).max(2);
+            let line = format!("{prefix}{:pad$}# {comment}", "");
+            eprintln!("{}", &line[..line.len().min(LINE_LIMIT)]);
+        }
+    };
+
     let cmd_display = cmd_args.join(" ");
     eprintln!("\n Performance counter stats for '{cmd_display}':\n");
 
-    eprintln!("  {:>20}  cycles", fmt_comma(delta.cycles));
+    print_line(&fmt_comma(delta.cycles), "cycles", "");
     let ipc = if delta.cycles > 0 {
         delta.instructions as f64 / delta.cycles as f64
     } else {
         0.0
     };
-    eprintln!(
-        "  {:>20}  instructions  # {:.2} insn per cycle",
-        fmt_comma(delta.instructions),
-        ipc,
+    print_line(
+        &fmt_comma(delta.instructions),
+        "instructions",
+        &format!("{ipc:.2} insn per cycle"),
     );
     eprintln!();
 
@@ -352,11 +378,7 @@ fn print_results(
             .find(|e| e.name == *name)
             .map(|e| e.description.as_str())
             .unwrap_or("");
-        if desc.is_empty() {
-            eprintln!("  {:>20}  {}", fmt_comma(*value), name);
-        } else {
-            eprintln!("  {:>20}  {}  # {}", fmt_comma(*value), name, desc);
-        }
+        print_line(&fmt_comma(*value), name, desc);
     }
 
     eprintln!("\n  {:>16.6} seconds wall clock", elapsed.as_secs_f64());
