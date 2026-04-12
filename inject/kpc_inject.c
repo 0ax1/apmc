@@ -144,8 +144,11 @@ __attribute__((constructor)) static void kpc_inject_initialize(void) {
         return;
     }
 
-    g_get_thread_counters = dlsym(kperf_handle, "kpc_get_thread_counters");
-    kpc_get_counter_count_fn get_counter_count = dlsym(kperf_handle, "kpc_get_counter_count");
+    // POSIX dlsym returns void*, but we need function pointers. Cast through
+    // void** to avoid -Wpedantic warnings about void*-to-function-pointer.
+    *(void **)&g_get_thread_counters = dlsym(kperf_handle, "kpc_get_thread_counters");
+    kpc_get_counter_count_fn get_counter_count;
+    *(void **)&get_counter_count = dlsym(kperf_handle, "kpc_get_counter_count");
     if (!g_get_thread_counters || !get_counter_count) {
         return;
     }
