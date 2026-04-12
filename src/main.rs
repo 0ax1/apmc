@@ -197,29 +197,13 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         libc::signal(libc::SIGTERM, libc::SIG_IGN);
     }
 
+    let has_inject = inject_dylib.is_some();
     if let Some(ref dylib_path) = inject_dylib {
         // Child keeps root so it can read its own thread counters.
         cmd.env("DYLD_INSERT_LIBRARIES", dylib_path);
         cmd.env("KPC_RESULT_FD", pipe_write.to_string());
-        unsafe {
-            cmd.pre_exec(move || {
-                // Restore default signal handling in child so Ctrl+C kills it.
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
-                let flags = libc::fcntl(pipe_write, libc::F_GETFD);
-                libc::fcntl(pipe_write, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-                Ok(())
-            });
-        }
     } else {
         // No dylib -- fall back to system-wide, drop root for child.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::signal(libc::SIGINT, libc::SIG_DFL);
-                libc::signal(libc::SIGTERM, libc::SIG_DFL);
-                Ok(())
-            });
-        }
         if let (Some(uid), Some(gid)) = (
             std::env::var("SUDO_UID")
                 .ok()
@@ -230,6 +214,18 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ) {
             cmd.uid(uid).gid(gid);
         }
+    }
+    unsafe {
+        cmd.pre_exec(move || {
+            // Restore default signal handling in child so Ctrl+C kills it.
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            if has_inject {
+                let flags = libc::fcntl(pipe_write, libc::F_GETFD);
+                libc::fcntl(pipe_write, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
     }
 
     let before_sw = mgr.read_system_wide()?;
