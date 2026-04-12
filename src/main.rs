@@ -140,6 +140,10 @@ enum Commands {
         #[arg(short = 's', long = "system-wide")]
         system_wide: bool,
 
+        /// Region mode: only measure code between apmc_start()/apmc_stop() calls.
+        #[arg(short = 'r', long = "region", conflicts_with = "system_wide")]
+        region: bool,
+
         /// Command and arguments to run.
         #[arg(required = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -155,8 +159,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stat {
             events,
             system_wide,
+            region,
             command,
-        } => cmd_stat(events.unwrap_or_default(), system_wide, &command, style),
+        } => cmd_stat(
+            events.unwrap_or_default(),
+            system_wide,
+            region,
+            &command,
+            style,
+        ),
     }
 }
 
@@ -231,7 +242,8 @@ fn cmd_list(filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 /// In per-process mode (default), injects `libapmc_inject.dylib` via
 /// `DYLD_INSERT_LIBRARIES`. The dylib hooks thread creation/destruction to
 /// accumulate per-thread counter deltas, then writes results back through a
-/// pipe fd at process exit.
+/// pipe fd at process exit. With `--region`, counter measurement is deferred
+/// to explicit `apmc_start()`/`apmc_stop()` calls in the target code.
 ///
 /// In system-wide mode (`-S`), reads global counters summed across all CPUs
 /// before and after the child process runs. The child drops root privileges
@@ -239,6 +251,7 @@ fn cmd_list(filter: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
 fn cmd_stat(
     event_names: Vec<String>,
     system_wide: bool,
+    region: bool,
     cmd_args: &[String],
     style: &Style,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -297,6 +310,9 @@ fn cmd_stat(
         let (pipe_read, pipe_write) = create_pipe()?;
         cmd.env("DYLD_INSERT_LIBRARIES", &dylib_path);
         cmd.env("KPC_RESULT_FD", pipe_write.to_string());
+        if region {
+            cmd.env("APMC_REGION_MODE", "1");
+        }
         // Clear close-on-exec so the child (and its injected dylib) can write
         // counter results back through this fd.
         unsafe {

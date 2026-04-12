@@ -4,6 +4,8 @@
 //! - **kpep**: Parse Apple's PMC event database to discover all available hardware events
 //!   for the current CPU.
 //! - **kpc**: Configure and read hardware performance counters via Apple's private kpc API.
+//! - **region**: Opt-in API for measuring only specific code sections
+//!   (`apmc_start()`/`apmc_stop()`).
 //!
 //! # Requirements
 //! - macOS on Apple Silicon (M1/M2/M3/M4)
@@ -22,6 +24,7 @@
 
 pub mod kpc;
 pub mod kpep;
+pub mod region;
 
 pub use kpc::KpcManager;
 pub use kpep::KpepDatabase;

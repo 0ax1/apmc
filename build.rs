@@ -52,4 +52,27 @@ fn main() {
     );
 
     println!("cargo:rustc-env=KPC_INJECT_DYLIB={}", dylib_path.display());
+
+    // Build the C region mode example.
+    println!("cargo:rerun-if-changed=examples/region_test.c");
+    let example_path = out_dir.join("region_test_c");
+    let mut cc_example = Command::new("cc");
+    cc_example.args([
+        opt_flag,
+        "-Wall",
+        "-Wpedantic",
+        "-Werror",
+        "-I",
+        "include",
+        "-o",
+        example_path.to_str().unwrap(),
+        "examples/region_test.c",
+    ]);
+    if env::var("PROFILE").as_deref() != Ok("release") {
+        cc_example.arg("-g");
+    }
+    let status = cc_example
+        .status()
+        .expect("failed to compile examples/region_test.c");
+    assert!(status.success(), "failed to compile examples/region_test.c");
 }

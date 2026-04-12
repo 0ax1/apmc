@@ -27,6 +27,9 @@ sudo apmc stat -e L1D_CACHE_MISS_LD,BRANCH_MISPRED_NONSPEC -- ./my_program
 # System-wide counting (includes background activity)
 sudo apmc stat -s -- ./my_program
 
+# Region mode: only measure code between apmc_start()/apmc_stop()
+sudo apmc stat --region -- ./my_program
+
 # Disable colored output
 sudo apmc stat --no-color -- ./my_program
 ```
@@ -59,6 +62,36 @@ The `# …` descriptions next to each event are sourced from Apple's kpep databa
 2. **Counter programming**: Loads the private `kperf.framework` via `dlopen` and calls the `kpc_*` API to configure and read hardware counters
 3. **Slot assignment**: Automatically assigns events to counter slots respecting hardware constraints (`counters_mask`)
 4. **Per-process measurement** (default): A dylib injected via `DYLD_INSERT_LIBRARIES` hooks thread lifecycle to capture per-thread counters, covering both naturally terminating threads and long-lived thread pools. Descendant processes (fork children) are tracked automatically via `pthread_atfork`
+
+## Region Mode
+
+Measure only specific code sections instead of the entire process.
+
+**C / C++** — compile with `-I /path/to/apmc/include`:
+
+```c
+#include <apmc.h>
+
+apmc_start();
+// ... hot code ...
+apmc_stop();
+```
+
+**Rust** — add `apmc` as a dependency:
+
+```rust
+apmc::region::start();
+// ... hot code ...
+apmc::region::stop();
+```
+
+Run with `--region`:
+
+```bash
+sudo apmc stat --region -- ./my_program
+```
+
+Calls are no-ops when the dylib isn't loaded. Multiple start/stop pairs accumulate across threads.
 
 ## Architecture
 

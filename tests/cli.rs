@@ -84,6 +84,7 @@ fn stat_help_shows_default_events() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("L1D_CACHE_MISS_LD"));
     assert!(stdout.contains("system-wide"));
+    assert!(stdout.contains("--region"));
 }
 
 #[test]
@@ -135,13 +136,21 @@ fn stat_reports_nonzero_exit_status() {
     assert!(stderr.contains("exit status"));
 }
 
+#[test]
+fn stat_region_conflicts_with_system_wide() {
+    let output = apmc()
+        .args(["stat", "--region", "--system-wide", "--", "true"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 fn extract_event_count(output: &str) -> usize {
     for line in output.lines() {
         if line.contains("events listed") {
             return line
-                .trim()
                 .split_whitespace()
                 .next()
                 .and_then(|n| n.parse().ok())
@@ -150,4 +159,3 @@ fn extract_event_count(output: &str) -> usize {
     }
     0
 }
-

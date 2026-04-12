@@ -47,6 +47,7 @@ struct thread_slot {
 
 static int g_total_counters;
 static int g_result_fd = -1;
+static int g_region_mode;
 static kpc_get_thread_counters_fn g_get_thread_counters;
 static pthread_introspection_hook_t g_previous_hook;
 
@@ -106,7 +107,7 @@ static void tls_destructor(void *arg) {
 }
 
 static void thread_hook(unsigned int event, pthread_t thread, void *addr, size_t size) {
-    if (g_get_thread_counters == NULL) {
+    if (g_get_thread_counters == NULL || g_region_mode) {
         goto chain;
     }
 
@@ -151,22 +152,25 @@ static void atfork_child(void) {
         atomic_store(&g_slots[idx].state, SLOT_COLLECTED);
     }
 
-    // Reset slot allocator and pending signal count.
+    // Reset slot allocator, thread slot, and pending signal count.
     atomic_store(&g_next_slot, 0);
     atomic_store(&g_pending_signals, 0);
+    t_my_slot = -1;
 
     // Re-create pthread key for this process (only one thread exists
     // after fork, so the old key's destructor state is stale).
     pthread_key_delete(g_tls_key);
     pthread_key_create(&g_tls_key, tls_destructor);
 
-    // Snapshot the (only) thread's counters fresh.
-    int slot = atomic_fetch_add(&g_next_slot, 1);
-    if (slot < MAX_THREAD_SLOTS) {
-        t_my_slot = slot;
-        g_get_thread_counters(0, g_total_counters, g_slots[slot].start);
-        atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
-        pthread_setspecific(g_tls_key, (void *)(intptr_t)(slot + 1));
+    // In region mode the child waits for explicit apmc_start() calls.
+    if (!g_region_mode) {
+        int slot = atomic_fetch_add(&g_next_slot, 1);
+        if (slot < MAX_THREAD_SLOTS) {
+            t_my_slot = slot;
+            g_get_thread_counters(0, g_total_counters, g_slots[slot].start);
+            atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
+            pthread_setspecific(g_tls_key, (void *)(intptr_t)(slot + 1));
+        }
     }
 
     // Note: the pthread introspection hook and SIGUSR2 handler are inherited
@@ -176,14 +180,16 @@ static void atfork_child(void) {
 
 // Dylib constructor — runs when DYLD_INSERT_LIBRARIES loads this dylib into
 // the target process. Resolves kperf symbols, installs the pthread introspection
-// hook to capture thread starts, registers a SIGUSR2 handler for collecting
-// counters from live threads at exit, and snapshots the main thread's counters.
+// hook to capture thread starts, and registers a SIGUSR2 handler for collecting
+// counters from live threads at exit. In normal mode, also snapshots the main
+// thread's counters immediately; in region mode, defers to apmc_start() calls.
 __attribute__((constructor)) static void kpc_inject_initialize(void) {
     const char *result_fd_env = getenv("KPC_RESULT_FD");
     if (!result_fd_env) {
         return;
     }
     g_result_fd = atoi(result_fd_env);
+    g_region_mode = (getenv("APMC_REGION_MODE") != NULL);
 
     void *kperf_handle = dlopen("/System/Library/PrivateFrameworks/kperf.framework/kperf", RTLD_LAZY);
     if (!kperf_handle) {
@@ -220,13 +226,16 @@ __attribute__((constructor)) static void kpc_inject_initialize(void) {
     sigemptyset(&sig_action.sa_mask);
     sigaction(SIGUSR2, &sig_action, NULL);
 
-    // Record main thread start.
-    int slot = atomic_fetch_add(&g_next_slot, 1);
-    if (slot < MAX_THREAD_SLOTS) {
-        t_my_slot = slot;
-        g_get_thread_counters(0, g_total_counters, g_slots[slot].start);
-        atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
-        pthread_setspecific(g_tls_key, (void *)(intptr_t)(slot + 1));
+    // In normal mode, start counting immediately. In region mode, defer
+    // to explicit apmc_start() calls.
+    if (!g_region_mode) {
+        int slot = atomic_fetch_add(&g_next_slot, 1);
+        if (slot < MAX_THREAD_SLOTS) {
+            t_my_slot = slot;
+            g_get_thread_counters(0, g_total_counters, g_slots[slot].start);
+            atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
+            pthread_setspecific(g_tls_key, (void *)(intptr_t)(slot + 1));
+        }
     }
 
     g_previous_hook = pthread_introspection_hook_install(thread_hook);
@@ -234,6 +243,37 @@ __attribute__((constructor)) static void kpc_inject_initialize(void) {
     // Register fork handler so child processes reset state and report
     // their own counters independently.
     pthread_atfork(NULL, NULL, atfork_child);
+}
+
+// Region mode API — called by user code via the apmc.h header.
+// apmc_start_impl: allocate a slot on first call, snapshot current counters.
+// apmc_stop_impl: collect delta (current - start) and accumulate.
+// Multiple start/stop pairs on the same thread accumulate into g_accumulated.
+// Only the owning thread calls these, so no CAS needed for the COLLECTED->ACTIVE
+// transition in start — the slot is either freshly allocated or was set to
+// COLLECTED by a previous stop.
+
+void apmc_start_impl(void) {
+    if (!g_get_thread_counters || !g_region_mode)
+        return;
+
+    if (t_my_slot < 0) {
+        int slot = atomic_fetch_add(&g_next_slot, 1);
+        if (slot >= MAX_THREAD_SLOTS)
+            return;
+        t_my_slot = slot;
+        pthread_setspecific(g_tls_key, (void *)(intptr_t)(slot + 1));
+    }
+
+    int slot = t_my_slot;
+    g_get_thread_counters(0, g_total_counters, g_slots[slot].start);
+    atomic_store(&g_slots[slot].state, SLOT_ACTIVE);
+}
+
+void apmc_stop_impl(void) {
+    if (!g_get_thread_counters || !g_region_mode)
+        return;
+    collect_slot(t_my_slot);
 }
 
 // Dylib destructor — runs during process teardown. Collects the main thread's
@@ -303,8 +343,7 @@ __attribute__((destructor)) static void kpc_inject_finalize(void) {
     unsigned char msg[sizeof(unsigned int) + MAX_COUNTERS * sizeof(unsigned long long)];
     unsigned int counter_count = (unsigned int)g_total_counters;
     memcpy(msg, &counter_count, sizeof(counter_count));
-    memcpy(msg + sizeof(counter_count), totals,
-           sizeof(unsigned long long) * g_total_counters);
+    memcpy(msg + sizeof(counter_count), totals, sizeof(unsigned long long) * g_total_counters);
     size_t msg_len = sizeof(counter_count) + sizeof(unsigned long long) * g_total_counters;
     write(g_result_fd, msg, msg_len);
     close(g_result_fd);
