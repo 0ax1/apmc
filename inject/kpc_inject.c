@@ -124,6 +124,10 @@ chain:
     }
 }
 
+// Dylib constructor — runs when DYLD_INSERT_LIBRARIES loads this dylib into
+// the target process. Resolves kperf symbols, installs the pthread introspection
+// hook to capture thread starts, registers a SIGUSR2 handler for collecting
+// counters from live threads at exit, and snapshots the main thread's counters.
 __attribute__((constructor)) static void kpc_inject_initialize(void) {
     const char *result_fd_env = getenv("KPC_RESULT_FD");
     if (!result_fd_env) {
@@ -176,6 +180,10 @@ __attribute__((constructor)) static void kpc_inject_initialize(void) {
     g_previous_hook = pthread_introspection_hook_install(thread_hook);
 }
 
+// Dylib destructor — runs during process teardown. Collects the main thread's
+// counters, signals all remaining live threads via SIGUSR2 to collect theirs,
+// waits briefly for responses, then writes the accumulated totals to the pipe
+// fd for the parent process to read.
 __attribute__((destructor)) static void kpc_inject_finalize(void) {
     if (g_result_fd < 0 || !g_get_thread_counters) {
         return;
