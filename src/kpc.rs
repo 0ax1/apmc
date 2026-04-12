@@ -51,7 +51,8 @@ unsafe impl Sync for KpcFns {}
 impl KpcFns {
     fn load() -> Result<Self, KpcError> {
         let path = c"/System/Library/PrivateFrameworks/kperf.framework/kperf";
-        let handle = unsafe { dlopen(path.as_ptr(), 1) }; // RTLD_LAZY = 1
+        const RTLD_LAZY: i32 = 1;
+        let handle = unsafe { dlopen(path.as_ptr(), RTLD_LAZY) };
         if handle.is_null() {
             return Err(KpcError::LoadError(
                 "dlopen kperf.framework failed".to_string(),
@@ -90,17 +91,20 @@ extern "C" {
 
 fn ncpu() -> usize {
     unsafe {
-        let mut ncpu: i32 = 0;
+        let mut count: i32 = 0;
         let mut size = std::mem::size_of::<i32>();
         let name = c"hw.ncpu";
-        crate::kpep::libc::sysctlbyname(
+        let ret = crate::kpep::libc::sysctlbyname(
             name.as_ptr(),
-            &mut ncpu as *mut i32 as *mut _,
+            &mut count as *mut i32 as *mut _,
             &mut size,
             std::ptr::null_mut(),
             0,
         );
-        ncpu as usize
+        if ret != 0 || count <= 0 {
+            return 1; // safe fallback
+        }
+        count as usize
     }
 }
 
@@ -203,7 +207,8 @@ impl KpcManager {
         // Assign events to slots respecting counters_mask constraints.
         let assignments = Self::assign_slots(&configurable, self.n_config);
 
-        // Release and re-acquire counters
+        // Release and re-acquire counters. The sleep gives the kernel time
+        // to fully release the counters before we attempt to reclaim them.
         unsafe { (self.fns.force_all_ctrs_set)(0) };
         std::thread::sleep(std::time::Duration::from_millis(50));
 
@@ -304,8 +309,8 @@ impl KpcManager {
         // Sum across all CPUs
         let mut sums = vec![0u64; n_total];
         for cpu in 0..self.ncpu {
-            for c in 0..n_total {
-                sums[c] = sums[c].wrapping_add(buf[cpu * n_total + c]);
+            for counter in 0..n_total {
+                sums[counter] = sums[counter].wrapping_add(buf[cpu * n_total + counter]);
             }
         }
 
@@ -341,7 +346,7 @@ impl KpcManager {
     /// Get the names and values of configured events from a delta.
     ///
     /// Returns `(event_name, counter_value)` pairs for each configured event
-    /// that was actually programmed (per readback from the kernel).
+    /// that was successfully assigned to a counter slot.
     pub fn labeled_counters<'a>(&'a self, delta: &'a CounterDelta) -> Vec<(&'a str, u64)> {
         self.configured_events
             .iter()

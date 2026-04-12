@@ -104,7 +104,7 @@ fn cmd_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mask_str = match event.counters_mask {
-            Some(m) => format!("mask=0x{m:x}"),
+            Some(mask) => format!("mask=0x{mask:x}"),
             None => "any slot".to_string(),
         };
 
@@ -126,19 +126,19 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_names: Vec<String> = Vec::new();
     let mut cmd_start = 0;
 
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--events" || args[i] == "-e" {
-            i += 1;
-            if i < args.len() {
-                event_names = args[i].split(',').map(|s| s.to_string()).collect();
+    let mut arg_idx = 0;
+    while arg_idx < args.len() {
+        if args[arg_idx] == "--events" || args[arg_idx] == "-e" {
+            arg_idx += 1;
+            if arg_idx < args.len() {
+                event_names = args[arg_idx].split(',').map(|s| s.to_string()).collect();
             }
-            i += 1;
-        } else if args[i] == "--" {
-            cmd_start = i + 1;
+            arg_idx += 1;
+        } else if args[arg_idx] == "--" {
+            cmd_start = arg_idx + 1;
             break;
         } else {
-            cmd_start = i;
+            cmd_start = arg_idx;
             break;
         }
     }
@@ -183,7 +183,14 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     mgr.configure(&events)?;
 
     // The injector dylib is compiled by build.rs and embedded in the binary.
-    let inject_dylib = write_embedded_dylib().ok();
+    // If writing fails, fall back to system-wide counting silently.
+    let inject_dylib = match write_embedded_dylib() {
+        Ok(path) => Some(path),
+        Err(err) => {
+            eprintln!("Warning: could not write inject dylib ({err}), falling back to system-wide counting");
+            None
+        }
+    };
 
     let mut cmd = Command::new(&cmd_args[0]);
     cmd.args(&cmd_args[1..]);
@@ -237,7 +244,9 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let status = child.wait()?;
     let elapsed = start_time.elapsed();
 
-    // Use per-process results if available, otherwise fall back to system-wide.
+    // The inject dylib accumulates per-thread deltas, so the snapshot values
+    // are already deltas. Compute delta against a zeroed snapshot (identity op)
+    // to convert into a CounterDelta with labeled cycles/instructions/configurable.
     let delta = match read_inject_results(pipe_read, mgr.n_fixed()) {
         Some(snap) => {
             let zero = apmc::kpc::CounterSnapshot {
@@ -282,14 +291,14 @@ fn cmd_stat(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn fmt_comma(n: u64) -> String {
-    let s = n.to_string();
+fn fmt_comma(value: u64) -> String {
+    let digits = value.to_string();
     let mut result = String::new();
-    for (i, ch) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
+    for (position, digit) in digits.chars().rev().enumerate() {
+        if position > 0 && position % 3 == 0 {
             result.push(',');
         }
-        result.push(ch);
+        result.push(digit);
     }
     result.chars().rev().collect()
 }
@@ -315,8 +324,7 @@ fn write_embedded_dylib() -> Result<std::path::PathBuf, Box<dyn std::error::Erro
 /// Read the per-process counter results written by libkpc_inject.dylib.
 /// Protocol: u32 n_counters, then n_counters × u64 delta values.
 fn read_inject_results(fd: i32, n_fixed: usize) -> Option<apmc::kpc::CounterSnapshot> {
-    let mut file = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
-    let file: &mut std::fs::File = &mut file;
+    let mut file: std::fs::File = unsafe { std::os::unix::io::FromRawFd::from_raw_fd(fd) };
 
     let mut count_buf = [0u8; 4];
     file.read_exact(&mut count_buf).ok()?;
