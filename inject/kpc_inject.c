@@ -56,6 +56,7 @@ static _Atomic int g_next_slot;
 
 static _Atomic unsigned long long g_accumulated[MAX_COUNTERS];
 static _Atomic int g_pending_signals;
+static _Atomic int g_finalized;
 
 // Each thread's index into g_slots, or -1 if not tracked.
 // Declared __thread (TLS) so the SIGUSR2 signal handler can read it
@@ -276,11 +277,12 @@ void apmc_stop_impl(void) {
     collect_slot(t_my_slot);
 }
 
-// Dylib destructor — runs during process teardown. Collects the main thread's
-// counters, signals all remaining live threads via SIGUSR2 to collect theirs,
-// waits briefly for responses, then writes the accumulated totals to the pipe
-// fd for the parent process to read.
-__attribute__((destructor)) static void kpc_inject_finalize(void) {
+// Flush accumulated counters to the pipe fd. Made idempotent via g_finalized
+// so it is safe to call from both the destructor and the _exit interpose.
+static void kpc_inject_finalize(void) {
+    if (atomic_exchange(&g_finalized, 1)) {
+        return;  // Already finalized.
+    }
     if (g_result_fd < 0 || !g_get_thread_counters) {
         return;
     }
@@ -348,3 +350,27 @@ __attribute__((destructor)) static void kpc_inject_finalize(void) {
     write(g_result_fd, msg, msg_len);
     close(g_result_fd);
 }
+
+// Dylib destructor — forwards to the idempotent finalizer.
+__attribute__((destructor)) static void kpc_inject_destructor(void) {
+    kpc_inject_finalize();
+}
+
+// Interpose _exit() to flush counters before process termination.
+// Many programs (especially fork children) call _exit() rather than exit(),
+// which skips __attribute__((destructor)) functions. The DYLD_INTERPOSE
+// mechanism redirects all _exit() calls (from the program and libraries)
+// through this wrapper, while calls from within this dylib still reach
+// the real _exit().
+static void apmc_exit(int status) __attribute__((noreturn));
+static void apmc_exit(int status) {
+    kpc_inject_finalize();
+    _exit(status);
+}
+
+__attribute__((used, section("__DATA,__interpose")))
+static struct { const void *replacement; const void *replacee; }
+s_interpose_exit = {
+    (const void *)(unsigned long long)&apmc_exit,
+    (const void *)(unsigned long long)&_exit
+};
