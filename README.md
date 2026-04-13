@@ -126,5 +126,5 @@ Note: `INST_*` events (retired instruction counts) require Apple's private `com.
 
 ## See Also
 
-- [COUNTERS.md](COUNTERS.md) -- full list of available PMC events on Apple A15/M2
+- [COUNTERS.md](COUNTERS.md) -- PMC event references for M1-M5
 - Apple's kpep database: `/usr/share/kpep/`
