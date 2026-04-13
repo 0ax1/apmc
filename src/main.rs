@@ -277,6 +277,7 @@ fn cmd_stat(
     }
 
     let mut mgr = KpcManager::new()?;
+    mgr.configure(&events)?;
     eprintln!(
         "CPU: {} ({} fixed + {} configurable counters, {} CPUs)",
         db.cpu.marketing_name,
@@ -284,8 +285,6 @@ fn cmd_stat(
         mgr.n_configurable(),
         mgr.ncpu(),
     );
-
-    mgr.configure(&events)?;
 
     let mut cmd = Command::new(&cmd_args[0]);
     cmd.args(&cmd_args[1..]);

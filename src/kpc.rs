@@ -192,21 +192,6 @@ impl KpcManager {
     /// Only configurable (non-fixed) events can be programmed. Fixed counters
     /// (cycles, instructions) are always available.
     pub fn configure(&mut self, events: &[&KpepEvent]) -> Result<(), KpcError> {
-        let configurable: Vec<_> = events
-            .iter()
-            .copied()
-            .filter(|e| e.is_configurable())
-            .collect();
-        if configurable.len() > self.n_config {
-            return Err(KpcError::TooManyEvents {
-                requested: configurable.len(),
-                max: self.n_config,
-            });
-        }
-
-        // Assign events to slots respecting counters_mask constraints.
-        let assignments = Self::assign_slots(&configurable, self.n_config);
-
         // Release and re-acquire counters. The sleep gives the kernel time
         // to fully release the counters before we attempt to reclaim them.
         unsafe { (self.fns.force_all_ctrs_set)(0) };
@@ -215,6 +200,29 @@ impl KpcManager {
         if unsafe { (self.fns.force_all_ctrs_set)(1) } != 0 {
             return Err(KpcError::ApiError("force_all_ctrs_set", errno()));
         }
+
+        // Re-query counter counts after acquiring. On M4, force_all_ctrs_set(1)
+        // releases kernel-reserved counters, changing the configurable count
+        // (e.g. 5 → 8).
+        self.n_fixed = unsafe { (self.fns.get_counter_count)(KPC_CLASS_FIXED_MASK) } as usize;
+        self.n_config =
+            unsafe { (self.fns.get_counter_count)(KPC_CLASS_CONFIGURABLE_MASK) } as usize;
+
+        let configurable: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|e| e.is_configurable())
+            .collect();
+        if configurable.len() > self.n_config {
+            let _ = unsafe { (self.fns.force_all_ctrs_set)(0) };
+            return Err(KpcError::TooManyEvents {
+                requested: configurable.len(),
+                max: self.n_config,
+            });
+        }
+
+        // Assign events to slots respecting counters_mask constraints.
+        let assignments = Self::assign_slots(&configurable, self.n_config);
 
         // Disable counting while reconfiguring
         unsafe { (self.fns.set_counting)(0) };
